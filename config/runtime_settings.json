@@ -1,0 +1,10 @@
+{
+  "push_ms": 5000,
+  "max_live_rows": 250,
+  "min_drawdown": 5.0,
+  "max_drawdown": 60.0,
+  "min_severity": 1,
+  "compact_mode": false,
+  "show_news_preview": true,
+  "ai_web_search": false
+}
