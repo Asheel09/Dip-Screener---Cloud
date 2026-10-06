@@ -66,3 +66,6 @@ See `CHANGELOG_V2_8.md` for the Mover Radar release.
 
 ## v3.2
 See `CHANGELOG_V3_2.md`.
+
+## v3.3
+- Relay-side catalyst/news enrichment for Mover Radar so Render does not need to rediscover reasons from blocked cloud IPs.

@@ -77,7 +77,7 @@ Your Git repository becomes the master copy for future Meridian updates.
 Only after:
 
 1. Render says the deployment is **Live**.
-2. `/api/health` reports version `3.2.0`.
+2. `/api/health` reports version `3.3.0`.
 3. Mover Radar returns real Yahoo US/European results.
 4. The same URL works from a second device.
 
