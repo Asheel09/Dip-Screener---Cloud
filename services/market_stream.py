@@ -25,7 +25,7 @@ class MarketState:
         self.ready_symbols=set(self.rows) if self.provider=='demo' else set()
         self.connection_state='DEMO' if self.provider=='demo' else 'WAITING'
         self.connection_message='Synthetic market stream' if self.provider=='demo' else ('Starting cloud market data' if self.provider=='yahoo' else 'Waiting for IBKR Client Portal Gateway')
-        self.last_error=None; self._ibkr=None; self._yahoo=None; self._tradingview=TradingViewMoverAPI() if self.provider=='yahoo' else None; self._history={}; self._spy_bars=None; self.rotation_index=0; self.scan_cycle=0; self.scanned_symbols=set(); self._history_task=None; self._mover_cache={}
+        self.last_error=None; self._ibkr=None; self._yahoo=None; self._tradingview=TradingViewMoverAPI() if self.provider=='yahoo' else None; self._history={}; self._spy_bars=None; self.rotation_index=0; self.scan_cycle=0; self.scanned_symbols=set(); self._history_task=None; self._mover_cache={}; self._relay_movers=None
         self.market_symbols=[s for s,r in self.rows.items() if r.get('kind')=='market']
         self.stock_symbols=[s for s,r in self.rows.items() if r.get('kind','stock')=='stock']
         requested=[s.strip().upper() for s in os.getenv('MERIDIAN_PRIORITY_SYMBOLS',','.join(DEFAULT_PRIORITY)).split(',') if s.strip()]
@@ -181,11 +181,63 @@ class MarketState:
             if k in quote: row[k]=quote[k]
         row['provider']='ibkr'; self.ready_symbols.add(symbol); self.scanned_symbols.add(symbol); return True
 
+    def set_relay_movers(self, rows: list[dict], *, source: str = "local-relay", collected_at: float | None = None) -> dict:
+        now=time.time(); clean=[]
+        for raw in (rows or [])[:160]:
+            try:
+                symbol=str(raw.get('symbol') or '').strip()[:32]
+                name=str(raw.get('name') or symbol).strip()[:180]
+                region=str(raw.get('region') or 'US').strip()[:24]
+                move=float(raw.get('move'))
+            except Exception:
+                continue
+            if not symbol or not (-100 < move < 100):
+                continue
+            row={
+                'symbol':symbol,'name':name,'region':region,
+                'region_code':'us' if region.lower().startswith('us') else 'europe',
+                'exchange':str(raw.get('exchange') or '')[:32],
+                'move':round(move,3),'scanner_value':f'{move:.2f}%',
+                'price':raw.get('price'),'extended_price':raw.get('extended_price'),
+                'prior_close':raw.get('prior_close'),'session':str(raw.get('session') or '')[:32],
+                'market_state':str(raw.get('market_state') or raw.get('session') or '')[:32],
+                'delay_minutes':raw.get('delay_minutes'),'quote_source':str(raw.get('quote_source') or source)[:80],
+                'currency':str(raw.get('currency') or '')[:12],'market_cap':raw.get('market_cap'),
+                'volume':raw.get('volume'),'relative_volume':raw.get('relative_volume'),
+                'tv_symbol':str(raw.get('tv_symbol') or '')[:80],
+            }
+            clean.append(row)
+        clean.sort(key=lambda x: float(x.get('move') or 999))
+        for i,row in enumerate(clean,1): row['rank']=i
+        ts=float(collected_at or now)
+        self._relay_movers={'rows':clean,'source':source,'collected_at':ts,'received_at':now}
+        self.version+=1
+        return {'ok':True,'accepted':len(clean),'collected_at':ts}
+
+    def _relay_scan(self, region: str) -> dict | None:
+        relay=self._relay_movers
+        if not relay: return None
+        rows=relay.get('rows') or []
+        if region=='us': rows=[x for x in rows if x.get('region_code')=='us']
+        elif region=='europe': rows=[x for x in rows if x.get('region_code')=='europe']
+        age=max(0,time.time()-float(relay.get('collected_at') or 0))
+        stale=age>600
+        return {
+            'provider':'local-relay','region':region,'rows':rows[:60],
+            'errors':(['Local relay snapshot is stale; start the work-laptop collector for fresh mover data.'] if stale else []),
+            'updated_at':float(relay.get('collected_at') or 0),'received_at':float(relay.get('received_at') or 0),
+            'age_seconds':round(age,1),'stale':stale,'cached':True,
+            'session_note':'Mover data collected from the local Meridian relay and pushed securely to Render.'
+        }
+
     async def mover_radar(self, region: str = "all", *, force: bool = False) -> dict:
         region=region.lower().strip()
         if region not in {"all","us","europe"}:
             raise ValueError("region must be all, us, or europe")
         if self.provider == "yahoo":
+            relay=self._relay_scan(region)
+            if relay is not None:
+                return relay
             # Render/shared cloud IPs are often throttled by Yahoo's screener.
             # Use TradingView's bulk market scanner first; Yahoo remains a fallback.
             limit=60 if region=='all' else 45
