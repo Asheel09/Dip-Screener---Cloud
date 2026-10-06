@@ -15,7 +15,7 @@ class DashboardTests(unittest.TestCase):
     def test_health(self):
         d = self.client.get('/api/health').json()
         self.assertTrue(d['ok'])
-        self.assertEqual(d['version'], '3.1.0')
+        self.assertEqual(d['version'], '3.2.0')
         self.assertIn('ai_configured', d)
 
     def test_live_has_rows_and_settings(self):
@@ -125,6 +125,19 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(session, 'PREVIOUS_CLOSE')
         self.assertEqual(reference, 661.75)
         self.assertIsNone(extended)
+
+
+    def test_relay_snapshot_preferred_and_filtered(self):
+        from app import state
+        state.set_relay_movers([
+            {'symbol':'SU','name':'Schneider Electric','region':'Europe','exchange':'EURONEXT','move':-9.2,'price':250,'session':'REGULAR'},
+            {'symbol':'STX','name':'Seagate','region':'US','exchange':'NASDAQ','move':-8.1,'price':200,'session':'PREMARKET'},
+        ], source='test-relay')
+        all_scan=state._relay_scan('all')
+        self.assertEqual(all_scan['provider'],'local-relay')
+        self.assertEqual(len(all_scan['rows']),2)
+        eu=state._relay_scan('europe')
+        self.assertEqual([x['symbol'] for x in eu['rows']],['SU'])
 
     def test_ai_without_key_is_safe(self):
         # In CI/local test environments without a key, this should fail clearly rather than expose anything.
