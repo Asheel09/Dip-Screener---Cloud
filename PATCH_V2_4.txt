@@ -1,0 +1,12 @@
+Meridian v2.4
+
+Apply this patch over a clean Meridian v2.3 folder.
+Your .env is intentionally not included or overwritten.
+
+Recommended .env additions:
+  IBKR_ACTIVE_LINES=90
+  IBKR_QUOTE_MODE=free_stream
+  IBKR_FREE_EXCHANGE=IEX
+  IBKR_WS_COLLECT_SECONDS=1.6
+
+The dashboard tracks 505 stocks + 21 broad-market proxies.

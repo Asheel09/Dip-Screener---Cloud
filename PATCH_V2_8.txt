@@ -1,0 +1,5 @@
+Meridian v2.8 patch
+
+Adds Mover Radar: IBKR global Top % Losers discovery across US and major European venues, with asynchronous free catalyst checks.
+
+For an existing v2.7 folder, extract the v2.7 -> v2.8 patch directly into that folder and replace existing files. Your .env and runtime caches are not included in the patch.

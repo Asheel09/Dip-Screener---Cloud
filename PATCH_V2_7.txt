@@ -1,0 +1,1 @@
+Meridian v2.6 → v2.7 patch. Extract into the existing v2.6 folder and replace files. The patch does not contain .env, runtime settings, event database, or IBKR history cache. Restart Meridian after applying.

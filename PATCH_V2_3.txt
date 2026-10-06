@@ -1,0 +1,22 @@
+Meridian v2.3
+
+SAFEST INSTALL (recommended if your local folder name/version is confusing):
+1. Extract market_dashboard_v2_3.zip as a new folder.
+2. Copy your existing .env from market_dashboard_v1 into the new folder.
+3. Confirm the .env contains:
+   MARKET_DATA_PROVIDER=ibkr
+   NEWS_PROVIDER=free   (NEWS_PROVIDER=auto also maps to the free pipeline in v2.3)
+   SEC_USER_AGENT=Meridian your-real-email@example.com
+4. Start Client Portal Gateway and authenticate.
+5. Run Meridian from the new folder as usual.
+
+IN-PLACE PATCH:
+Extract market_dashboard_v2_2_to_v2_3_patch.zip directly into the current Meridian project folder and overwrite matching files.
+The patch intentionally contains no .env file, so your secrets/settings are preserved.
+
+What changed:
+- 49 instruments total (28 stocks + 21 Broad Market proxies)
+- new separate Broad Market tab
+- free GDELT + SEC + Fed + BLS news/events
+- persistent local events.sqlite3 created automatically at runtime
+- IBKR 6509 quote badges for realtime/delayed and consolidated/non-consolidated status

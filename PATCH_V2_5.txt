@@ -1,0 +1,7 @@
+Meridian v2.5
+
+Fixes:
+- Authenticate Client Portal Gateway WebSocket using the session token from /tickle before subscribing to IEX market data.
+- Resolve dotted share-class symbols (BRK.B, BF.B) using IBKR space-separated aliases.
+
+No .env changes required from v2.4.

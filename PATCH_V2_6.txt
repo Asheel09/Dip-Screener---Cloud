@@ -1,0 +1,8 @@
+Meridian v2.6
+
+Apply this patch over a Meridian v2.5 folder.
+Your .env is not included and will not be overwritten.
+Restart Meridian after extracting the patch.
+
+Optional .env setting:
+IBKR_PREMARKET_EXCHANGE=EDGX

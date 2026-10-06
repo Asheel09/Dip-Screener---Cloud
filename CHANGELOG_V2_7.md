@@ -1,0 +1,12 @@
+# Meridian v2.7
+- Added three-state sortable screener headers: Default → Asc → Desc.
+- Added optional column filters for price, daily/weekly move, drawdown, severity, recovery and reason text.
+- Moved Recovery directly beside Severity; renamed Why moving to Reason and moved it to the far right.
+- IBKR mode no longer inherits seeded/demo catalyst text; unsupported reasons are blank until current research verifies a catalyst.
+- Generic Meridian filler company descriptions are suppressed rather than shown as research.
+- Research drawer renders local metrics immediately, then loads latest company news asynchronously.
+- Company news prioritizes recent GDELT web coverage; very recent SEC filings may appear as secondary context but never establish causality by themselves.
+- News & Catalysts supports All / Macro / Specific stock views, keeps its client-side cache across tab switches, and shows current screener research leads with recent price changes.
+- Added a five-minute server-side market-news cache.
+- Extended IBKR historical feature cache from 6 hours to 7 days to avoid daily full-history rebuilds.
+- WebSocket payload now computes the 526-instrument snapshot once per push instead of twice.

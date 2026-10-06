@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: meridian-market-dashboard
+    runtime: docker
+    plan: free
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: MARKET_DATA_PROVIDER
+        value: yahoo
+      - key: NEWS_PROVIDER
+        value: free
+      - key: YAHOO_CORE_REFRESH_SECONDS
+        value: 300
+      - key: RESEARCH_CACHE_SECONDS
+        value: 900
+      - key: SEC_USER_AGENT
+        sync: false
+      - key: MERIDIAN_PASSWORD
+        sync: false
