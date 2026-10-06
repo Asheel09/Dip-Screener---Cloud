@@ -18,3 +18,5 @@ services:
         sync: false
       - key: MERIDIAN_PASSWORD
         sync: false
+      - key: MERIDIAN_RELAY_TOKEN
+        sync: false

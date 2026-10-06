@@ -62,3 +62,7 @@ See `CHANGELOG_V2_8.md` for the Mover Radar release.
 - Added a five-minute server-side market-news cache.
 - Extended IBKR historical feature cache from 6 hours to 7 days to avoid daily full-history rebuilds.
 - WebSocket payload now computes the 526-instrument snapshot once per push instead of twice.
+
+
+## v3.2
+See `CHANGELOG_V3_2.md`.

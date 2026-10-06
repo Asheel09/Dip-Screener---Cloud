@@ -21,7 +21,7 @@ from services.dip_engine import classify
 
 ROOT = Path(__file__).resolve().parent
 load_dotenv(ROOT / ".env")
-app = FastAPI(title="Meridian Market Dashboard", version="3.1.0")
+app = FastAPI(title="Meridian Market Dashboard", version="3.2.0")
 state = MarketState()
 news = NewsService()
 research = ResearchService(news, state)
@@ -29,6 +29,7 @@ settings = SettingsService()
 ai = AIService()
 
 MERIDIAN_PASSWORD = os.getenv("MERIDIAN_PASSWORD", "").strip()
+MERIDIAN_RELAY_TOKEN = os.getenv("MERIDIAN_RELAY_TOKEN", "").strip()
 
 def _auth_token() -> str:
     if not MERIDIAN_PASSWORD:
@@ -41,7 +42,7 @@ def _authorized_cookie(value: str | None) -> bool:
 
 @app.middleware("http")
 async def meridian_auth(request: Request, call_next):
-    if not MERIDIAN_PASSWORD or request.url.path in {"/login", "/api/health"}:
+    if not MERIDIAN_PASSWORD or request.url.path in {"/login", "/api/health", "/api/relay/movers"}:
         return await call_next(request)
     if _authorized_cookie(request.cookies.get("meridian_session")):
         return await call_next(request)
@@ -88,6 +89,20 @@ class CustomizeRequest(BaseModel):
 
 class ApplyProposal(BaseModel):
     proposal: dict[str, Any]
+
+class RelayMoverPayload(BaseModel):
+    rows: list[dict[str, Any]] = Field(default_factory=list, max_length=160)
+    source: str = Field(default="local-relay", max_length=80)
+    collected_at: float | None = None
+
+@app.post("/api/relay/movers")
+async def relay_movers(payload: RelayMoverPayload, request: Request) -> dict:
+    if not MERIDIAN_RELAY_TOKEN:
+        raise HTTPException(status_code=503, detail="MERIDIAN_RELAY_TOKEN is not configured")
+    supplied = (request.headers.get("X-Meridian-Relay-Token") or "").strip()
+    if not supplied or not hmac.compare_digest(supplied, MERIDIAN_RELAY_TOKEN):
+        raise HTTPException(status_code=401, detail="Invalid relay token")
+    return state.set_relay_movers(payload.rows, source=payload.source, collected_at=payload.collected_at)
 
 @app.on_event("startup")
 async def start_market_stream() -> None:
@@ -162,7 +177,7 @@ def market_overview(rows: list[dict] | None = None) -> dict:
 
 @app.get("/api/health")
 def health() -> dict:
-    return {"ok": True, "mode": state.provider, "version": "3.1.0", "stream_version": state.version, "updated_at": state.updated_at, "market_status": state.status, "ai_configured": ai.configured, "news_provider": news.provider, "news_live": news.live, "news_status": news.status}
+    return {"ok": True, "mode": state.provider, "version": "3.2.0", "stream_version": state.version, "updated_at": state.updated_at, "market_status": state.status, "ai_configured": ai.configured, "news_provider": news.provider, "news_live": news.live, "news_status": news.status}
 
 @app.get("/api/screeners")
 def screeners(include_disabled: bool = False) -> list[dict]:

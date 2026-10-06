@@ -77,7 +77,7 @@ Your Git repository becomes the master copy for future Meridian updates.
 Only after:
 
 1. Render says the deployment is **Live**.
-2. `/api/health` reports version `3.1.0`.
+2. `/api/health` reports version `3.2.0`.
 3. Mover Radar returns real Yahoo US/European results.
 4. The same URL works from a second device.
 
@@ -92,3 +92,18 @@ The v2.x IBKR code remains in the project for fallback/testing. To use it locall
 ```bash
 python -m unittest discover -s tests -v
 ```
+
+
+## Local mover relay (free cloud workaround)
+
+Render shared IPs can be rate-limited by anonymous Yahoo/TradingView endpoints. Meridian v3.2 can therefore accept mover snapshots from one lightweight local collector while the dashboard itself remains hosted on Render.
+
+1. Add `MERIDIAN_RELAY_TOKEN` in Render Environment. Use a long random value.
+2. Download only `meridian_relay.py` onto the work laptop.
+3. Run:
+
+```powershell
+python meridian_relay.py --url https://YOUR-SERVICE.onrender.com --token YOUR_RELAY_TOKEN
+```
+
+The collector scans about every 90 seconds and uploads only mover rows. Phones and other computers still need only the Render URL. Stop it with Ctrl+C. If the relay stops, Meridian keeps the last snapshot and labels it stale after 10 minutes.
