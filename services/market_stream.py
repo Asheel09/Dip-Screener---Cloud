@@ -4,6 +4,7 @@ from pathlib import Path
 from .dip_engine import classify
 from .ibkr_webapi import IBKRWebAPI
 from .yahoo_market import YahooMarketAPI
+from .tradingview_market import TradingViewMoverAPI
 from .recovery_engine import analyse_recovery
 
 ROOT=Path(__file__).resolve().parents[1]
@@ -23,8 +24,8 @@ class MarketState:
         self.version=0; self.updated_at=time.time(); self._rng=random.Random(42)
         self.ready_symbols=set(self.rows) if self.provider=='demo' else set()
         self.connection_state='DEMO' if self.provider=='demo' else 'WAITING'
-        self.connection_message='Synthetic market stream' if self.provider=='demo' else ('Starting Yahoo cloud market data' if self.provider=='yahoo' else 'Waiting for IBKR Client Portal Gateway')
-        self.last_error=None; self._ibkr=None; self._yahoo=None; self._history={}; self._spy_bars=None; self.rotation_index=0; self.scan_cycle=0; self.scanned_symbols=set(); self._history_task=None; self._mover_cache={}
+        self.connection_message='Synthetic market stream' if self.provider=='demo' else ('Starting cloud market data' if self.provider=='yahoo' else 'Waiting for IBKR Client Portal Gateway')
+        self.last_error=None; self._ibkr=None; self._yahoo=None; self._tradingview=TradingViewMoverAPI() if self.provider=='yahoo' else None; self._history={}; self._spy_bars=None; self.rotation_index=0; self.scan_cycle=0; self.scanned_symbols=set(); self._history_task=None; self._mover_cache={}
         self.market_symbols=[s for s,r in self.rows.items() if r.get('kind')=='market']
         self.stock_symbols=[s for s,r in self.rows.items() if r.get('kind','stock')=='stock']
         requested=[s.strip().upper() for s in os.getenv('MERIDIAN_PRIORITY_SYMBOLS',','.join(DEFAULT_PRIORITY)).split(',') if s.strip()]
@@ -185,9 +186,24 @@ class MarketState:
         if region not in {"all","us","europe"}:
             raise ValueError("region must be all, us, or europe")
         if self.provider == "yahoo":
+            # Render/shared cloud IPs are often throttled by Yahoo's screener.
+            # Use TradingView's bulk market scanner first; Yahoo remains a fallback.
+            limit=60 if region=='all' else 45
+            if not self._tradingview:
+                self._tradingview=TradingViewMoverAPI()
+            tv = await self._tradingview.run_mover_scan(region, limit=limit, force=force)
+            if tv.get("rows"):
+                return tv
             if not self._yahoo:
                 self._yahoo=YahooMarketAPI()
-            return await self._yahoo.run_mover_scan(region, limit=60 if region=='all' else 45, force=force)
+            try:
+                yh = await self._yahoo.run_mover_scan(region, limit=limit, force=force)
+                if tv.get("errors"):
+                    yh["errors"] = [*(tv.get("errors") or []), *(yh.get("errors") or [])]
+                return yh
+            except Exception as exc:
+                tv["errors"] = [*(tv.get("errors") or []), f"Yahoo fallback: {exc}"]
+                return tv
         if self.provider != "ibkr":
             rows=[x for x in self.snapshot() if x.get("kind","stock")=="stock"]
             rows=sorted(rows,key=lambda x:float(x.get("day",0)))[:35]
@@ -262,13 +278,13 @@ class MarketState:
                     self.version+=1; self.updated_at=time.time()
                 self.connection_state='LIVE' if changed else ('CONNECTED' if self.ready_symbols else 'WAITING')
                 sess=self._yahoo.us_session()
-                self.connection_message=f'Yahoo cloud · {sess} · {len(self.ready_symbols)} core instruments ready · global Mover Radar available'
+                self.connection_message=f'Cloud market data · {sess} · {len(self.ready_symbols)} core instruments ready · TradingView Mover Radar available'
                 self.last_error=None; backoff=15.0
                 # Daily/reference core data does not need per-second polling. The browser
                 # still receives WebSocket state; global mover scans cache for two minutes.
                 await asyncio.sleep(max(60,int(os.getenv('YAHOO_CORE_REFRESH_SECONDS','300'))))
             except Exception as e:
-                self.connection_state='OFFLINE'; self.connection_message='Yahoo cloud market data temporarily unavailable'; self.last_error=str(e)
+                self.connection_state='OFFLINE'; self.connection_message='Cloud reference market data temporarily unavailable'; self.last_error=str(e)
                 await asyncio.sleep(backoff); backoff=min(120,backoff*1.5)
 
     async def ibkr_tick(self):
