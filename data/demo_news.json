@@ -1,0 +1,18 @@
+{
+  "AMD": [
+    {"time":"08:42","type":"sector","headline":"Semiconductor complex weakens as investors reassess near-term AI capex expectations","source":"Demo wire","impact":"negative","specificity":"sector","summary":"AMD is underperforming a weak semiconductor group, with no single company-specific impairment identified in the demo feed."},
+    {"time":"07:55","type":"macro","headline":"Long-end yields move higher ahead of US data","source":"Demo macro","impact":"negative","specificity":"macro","summary":"Higher yields are pressuring long-duration growth equities broadly."}
+  ],
+  "BKNG": [
+    {"time":"09:03","type":"second-order","headline":"AI travel-agent developments renew concern around online travel intermediaries","source":"Demo thematic","impact":"negative","specificity":"second-order","summary":"The move is linked to competitive concerns rather than a Booking-specific announcement."}
+  ],
+  "MU": [
+    {"time":"08:15","type":"company","headline":"Memory outlook commentary drives repricing across DRAM and NAND names","source":"Demo company feed","impact":"mixed","specificity":"company","summary":"Investors are digesting supply, pricing and capex implications after company commentary."}
+  ],
+  "META": [
+    {"time":"09:09","type":"unclear","headline":"No clear material company-specific catalyst identified","source":"Scanner","impact":"neutral","specificity":"unclear","summary":"The stock is moving more than the broad market, but the demo feed has not matched a material catalyst."}
+  ],
+  "NKE": [
+    {"time":"08:31","type":"company","headline":"Demand and execution concerns weigh on shares","source":"Demo company feed","impact":"negative","specificity":"company","summary":"The current decline is treated as higher impairment risk than a normal market-driven correction."}
+  ]
+}
