@@ -205,6 +205,11 @@ class MarketState:
                 'currency':str(raw.get('currency') or '')[:12],'market_cap':raw.get('market_cap'),
                 'volume':raw.get('volume'),'relative_volume':raw.get('relative_volume'),
                 'tv_symbol':str(raw.get('tv_symbol') or '')[:80],
+                'reason':str(raw.get('reason') or '')[:180],
+                'cause_type':str(raw.get('cause_type') or '')[:40],
+                'news_url':str(raw.get('news_url') or '')[:1200],
+                'news_source':str(raw.get('news_source') or '')[:120],
+                'news_published_at':str(raw.get('news_published_at') or '')[:120],
             }
             clean.append(row)
         clean.sort(key=lambda x: float(x.get('move') or 999))
