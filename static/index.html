@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Meridian — Market Intelligence</title>
+  <link rel="stylesheet" href="/static/styles.css?v=2.7" />
+</head>
+<body>
+  <div id="app">
+    <aside class="sidebar">
+      <div class="brand"><div class="brand-mark">M</div><div><strong>Meridian</strong><span>market intelligence</span></div></div>
+      <nav id="nav"></nav>
+      <div class="sidebar-bottom">
+        <button class="nav-item" data-tab="settings"><span class="nav-icon">⚙</span><span>Settings</span></button>
+        <div class="connection"><span class="pulse"></span><div><strong id="connectionText">Connecting</strong><span id="streamText">market stream</span></div></div>
+      </div>
+    </aside>
+    <main class="workspace">
+      <header class="topbar">
+        <div><div class="eyebrow" id="eyebrow">SCREENER</div><h1 id="pageTitle">Live Dips</h1></div>
+        <div class="top-actions">
+          <div class="search-wrap"><span>⌕</span><input id="globalSearch" placeholder="Search ticker, company or catalyst…" autocomplete="off" /></div>
+          <div class="status-pill"><span class="pulse"></span><span id="refreshLabel">LIVE</span></div>
+        </div>
+      </header>
+      <section id="view" class="content"></section>
+    </main>
+    <div id="drawerBackdrop" class="drawer-backdrop"></div>
+    <aside id="drawer" class="research-drawer" aria-hidden="true">
+      <div class="drawer-head"><div><span class="eyebrow">RESEARCH</span><h2 id="drawerTitle">—</h2><p id="drawerSubtitle">—</p></div><button id="closeDrawer" class="icon-btn">×</button></div>
+      <div id="drawerBody" class="drawer-body"></div>
+    </aside>
+    <div id="toast" class="toast"></div>
+  </div>
+  <script src="/static/app.js?v=2.7"></script>
+</body>
+</html>
