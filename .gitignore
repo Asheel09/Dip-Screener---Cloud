@@ -1,0 +1,10 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store
+data/ibkr_contract_cache.json
+data/ibkr_history_cache.json
+data/market_history_cache.json
+data/events.sqlite3
