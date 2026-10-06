@@ -15,7 +15,7 @@ class DashboardTests(unittest.TestCase):
     def test_health(self):
         d = self.client.get('/api/health').json()
         self.assertTrue(d['ok'])
-        self.assertEqual(d['version'], '3.2.0')
+        self.assertEqual(d['version'], '3.3.0')
         self.assertIn('ai_configured', d)
 
     def test_live_has_rows_and_settings(self):
@@ -130,12 +130,16 @@ class DashboardTests(unittest.TestCase):
     def test_relay_snapshot_preferred_and_filtered(self):
         from app import state
         state.set_relay_movers([
-            {'symbol':'SU','name':'Schneider Electric','region':'Europe','exchange':'EURONEXT','move':-9.2,'price':250,'session':'REGULAR'},
+            {'symbol':'SU','name':'Schneider Electric','region':'Europe','exchange':'EURONEXT','move':-9.2,'price':250,'session':'REGULAR',
+             'reason':'Schneider Electric falls after acquisition deal','cause_type':'corporate','news_url':'https://example.com/schneider'},
             {'symbol':'STX','name':'Seagate','region':'US','exchange':'NASDAQ','move':-8.1,'price':200,'session':'PREMARKET'},
         ], source='test-relay')
         all_scan=state._relay_scan('all')
         self.assertEqual(all_scan['provider'],'local-relay')
         self.assertEqual(len(all_scan['rows']),2)
+        self.assertEqual(all_scan['rows'][0]['reason'],'Schneider Electric falls after acquisition deal')
+        self.assertEqual(all_scan['rows'][0]['cause_type'],'corporate')
+        self.assertEqual(all_scan['rows'][0]['news_url'],'https://example.com/schneider')
         eu=state._relay_scan('europe')
         self.assertEqual([x['symbol'] for x in eu['rows']],['SU'])
 
