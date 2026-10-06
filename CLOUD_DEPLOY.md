@@ -30,7 +30,7 @@ No IBKR Gateway is needed.
 3. Render will read `render.yaml` and build the included Dockerfile.
 4. Choose/keep the **Free** instance plan.
 5. Enter `SEC_USER_AGENT` and `MERIDIAN_PASSWORD` when prompted.
-6. Wait for `/api/health` to return `"version":"3.0.0"`.
+6. Wait for `/api/health` to return `"version":"3.1.0"`.
 7. Open the generated `https://<name>.onrender.com` URL and log in.
 8. Open the same URL on a second device (phone or personal laptop) and confirm Mover Radar loads.
 
@@ -41,7 +41,7 @@ Do **not** delete your local Meridian folder immediately after the first deploy.
 You can delete it after all four checks pass:
 
 1. The Render deployment status is **Live**.
-2. `https://<your-url>/api/health` reports `3.0.0`.
+2. `https://<your-url>/api/health` reports `3.1.0`.
 3. Mover Radar returns actual Yahoo US/European rows (not demo data).
 4. You successfully log in and use the same URL from a **second device**.
 
