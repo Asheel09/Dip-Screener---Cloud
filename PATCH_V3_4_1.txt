@@ -1,0 +1,9 @@
+Meridian v3.4 -> v3.4.1 news hotfix
+
+1. Copy the patch files into the root of the Git repository connected to Render, replacing matching files.
+2. Commit and push. Render should redeploy automatically.
+3. Confirm /api/health reports version 3.4.1.
+4. On the Mac, replace meridian_relay_v3.py with the v3.4.1 file. start_meridian.command does not change.
+5. Restart the relay. Its Terminal line now reports both verified catalysts and how many mover rows have relevant news.
+
+If a mover has accepted company news but no defensible causal event, Meridian shows the news link while keeping Reason as “No verified catalyst found.”

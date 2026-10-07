@@ -17,7 +17,7 @@ Defaults remain `MARKET_DATA_PROVIDER=yahoo` and `NEWS_PROVIDER=free`. No OpenAI
 1. Copy the contents of `market_dashboard_v3_3_to_v3_4_cloud_patch.zip` over the v3.3 repository, replacing files when asked.
 2. Commit and push the changed files.
 3. Let Render redeploy.
-4. Open `/api/health` and confirm `"version":"3.4.0"`.
+4. Open `/api/health` and confirm `"version":"3.4.1"`.
 5. Replace the old Mac relay with the supplied `meridian_relay_v3.py`. Keep it beside `start_meridian.command`.
 6. Double-click `start_meridian.command`, then open Movers and press **Refresh scan** once to verify the new US gainers + losers feed.
 

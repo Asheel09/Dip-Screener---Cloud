@@ -60,7 +60,7 @@ The relay scans about every 90 seconds. If the Mac sleeps or the Terminal proces
 
 ## Deploying the site update
 
-Replace the v3.3 project files with the v3.4 patch (or use the full v3.4 folder), commit and push to the private Git repository connected to Render. After deployment, `/api/health` should report version `3.4.0`.
+Replace the v3.3 project files with the v3.4 patch (or use the full v3.4 folder), commit and push to the private Git repository connected to Render. After deployment, `/api/health` should report version `3.4.1`.
 
 ## Tests
 

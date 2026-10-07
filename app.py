@@ -21,7 +21,7 @@ from services.dip_engine import classify
 
 ROOT = Path(__file__).resolve().parent
 load_dotenv(ROOT / ".env")
-app = FastAPI(title="Meridian Market Dashboard", version="3.4.0")
+app = FastAPI(title="Meridian Market Dashboard", version="3.4.1")
 state = MarketState()
 news = NewsService()
 research = ResearchService(news, state)
@@ -177,7 +177,7 @@ def market_overview(rows: list[dict] | None = None) -> dict:
 
 @app.get("/api/health")
 def health() -> dict:
-    return {"ok": True, "mode": state.provider, "version": "3.4.0", "stream_version": state.version, "updated_at": state.updated_at, "market_status": state.status, "ai_configured": ai.configured, "news_provider": news.provider, "news_live": news.live, "news_status": news.status}
+    return {"ok": True, "mode": state.provider, "version": "3.4.1", "stream_version": state.version, "updated_at": state.updated_at, "market_status": state.status, "ai_configured": ai.configured, "news_provider": news.provider, "news_live": news.live, "news_status": news.status}
 
 @app.get("/api/screeners")
 def screeners(include_disabled: bool = False) -> list[dict]:
@@ -239,6 +239,7 @@ async def mover_news(symbol: str, name: str = "", region: str = "US", refresh: b
             "items": (bundle.get("items") or [])[:3],
             "live": bool(bundle.get("live")),
             "searched_at": bundle.get("searched_at"),
+            "error": bundle.get("error"),
         }
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
@@ -254,7 +255,7 @@ async def symbol_news(symbol: str, refresh: bool = False) -> dict:
         raise HTTPException(status_code=404, detail="Unknown symbol")
     bundle = await news.for_row(classify(row), force_refresh=refresh)
     reason = str(bundle.get("overall_cause") or "").strip()
-    if reason:
+    if reason and reason not in {"No verified catalyst found", "No clear material catalyst identified"}:
         row["cause"] = reason
         row["cause_type"] = bundle.get("cause_type") or "company"
         row["cause_verified"] = True
