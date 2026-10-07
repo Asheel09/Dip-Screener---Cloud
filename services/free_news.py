@@ -17,6 +17,8 @@ import httpx
 from .event_store import EventStore
 
 GDELT_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
+GOOGLE_NEWS_RSS = "https://news.google.com/rss/search"
+PUBLIC_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/129 Safari/537.36"
 SEC_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 SEC_SUBMISSIONS = "https://data.sec.gov/submissions/CIK{cik:010d}.json"
 
@@ -165,7 +167,7 @@ class FreeNewsCollector:
         return bool(self.sec_user_agent and "@" in self.sec_user_agent)
 
     async def _client_get(self, url: str, *, params: dict | None = None, sec: bool = False) -> httpx.Response:
-        headers = {"Accept": "application/json, application/rss+xml, application/xml, text/xml, */*"}
+        headers = {"Accept": "application/json, application/rss+xml, application/xml, text/xml, */*", "User-Agent": PUBLIC_UA}
         if sec:
             if not self.sec_configured:
                 raise RuntimeError("SEC_USER_AGENT is missing or does not contain a contact email")
@@ -181,6 +183,70 @@ class FreeNewsCollector:
             return {}
         mapping = await self._ensure_ticker_map()
         return mapping.get(symbol.upper(), {})
+
+    async def google_company(self, symbol: str, company: str, *, limit: int = 12) -> list[dict]:
+        """Google News RSS fallback for company-specific public coverage.
+
+        The RSS item stays a Google News redirect, but we screen the underlying
+        publisher from the <source> element before accepting it. That lets us
+        reject blocked/paywalled/community publishers while retaining a free,
+        clickable discovery link when GDELT is sparse or rate-limited.
+        """
+        query_name = _company_query_name(company, symbol)
+        q = f'"{query_name}" when:7d' if query_name and query_name.upper() != symbol.upper() else f'"{symbol}" when:7d'
+        r = await self._client_get(
+            GOOGLE_NEWS_RSS,
+            params={"q": q, "hl": "en-US", "gl": "US", "ceid": "US:en"},
+        )
+        try:
+            root = ET.fromstring(r.content)
+        except Exception:
+            return []
+        out: list[dict] = []
+        for entry in root.findall(".//item")[: max(20, limit * 3)]:
+            title = _clean(entry.findtext("title") or "")
+            link = _clean(entry.findtext("link") or "")
+            published = _iso_date(entry.findtext("pubDate") or "")
+            source_node = entry.find("source")
+            publisher = _clean(source_node.text if source_node is not None else "")
+            publisher_url = _clean(source_node.attrib.get("url", "") if source_node is not None else "")
+            # Google often appends " - Publisher" to the title. Strip it only
+            # when it matches the source tag so the actual headline is preserved.
+            headline = title
+            if publisher and title.lower().endswith((" - " + publisher).lower()):
+                headline = title[: -(len(publisher) + 3)].strip()
+            if not headline or not company_headline_relevant(headline, company, symbol):
+                continue
+            # Validate the actual publisher, not news.google.com.
+            if publisher_url:
+                if not source_allowed(publisher_url, publisher):
+                    continue
+            else:
+                plow = publisher.lower()
+                if any(b.split(".")[0] in plow for b in BLOCKED_NEWS_DOMAINS):
+                    continue
+            if not re.match(r"^https?://", link, flags=re.I):
+                continue
+            item = {
+                "event_key": _event_key(publisher or "Google News", link, headline),
+                "published_at": published,
+                "type": _classify(headline),
+                "headline": headline,
+                "source": publisher or "Google News",
+                "source_url": link,
+                "impact": "neutral",
+                "specificity": "company",
+                "summary": "Recent company-specific coverage surfaced through Google News.",
+                "why_it_matters": "Use the linked article to verify whether the event is material and whether it plausibly explains the move.",
+                "move_connection": "The headline is relevant to the company; Meridian only promotes it to the Reason field when it contains a recognizable catalyst.",
+                "symbol": symbol,
+                "company": company,
+                "source_quality": source_score(publisher_url, publisher),
+            }
+            out.append(item)
+        out = _dedupe(out)
+        self.store.upsert_many(out)
+        return out[:limit]
 
     async def gdelt_company(self, symbol: str, company: str, *, limit: int = 12) -> list[dict]:
         query_name = _company_query_name(company, symbol)

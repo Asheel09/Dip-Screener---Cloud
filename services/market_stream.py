@@ -224,6 +224,12 @@ class MarketState:
                 'news_source':str(raw.get('news_source') or '')[:120] if verified else '',
                 'news_published_at':str(raw.get('news_published_at') or '')[:120] if verified else '',
                 'reason_verified':verified,
+                # Preserve the latest accepted company-news link even when it is
+                # not strong enough to be promoted as the verified cause.
+                'latest_news_headline':str(raw.get('latest_news_headline') or '')[:220],
+                'latest_news_url':str(raw.get('latest_news_url') or '')[:1200],
+                'latest_news_source':str(raw.get('latest_news_source') or '')[:120],
+                'latest_news_published_at':str(raw.get('latest_news_published_at') or '')[:120],
             }
             clean.append(row)
         clean.sort(key=lambda x: abs(float(x.get('move') or 0)), reverse=True)

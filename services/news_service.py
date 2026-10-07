@@ -226,23 +226,33 @@ class NewsService:
                 identity = {}
         name = str(identity.get("name") or supplied_name or symbol).strip()
         if external or fast:
-            gdelt_result = await self.free.gdelt_company(symbol, name)
+            google_result, gdelt_result = await __import__('asyncio').gather(
+                self.free.google_company(symbol, name),
+                self.free.gdelt_company(symbol, name),
+                return_exceptions=True,
+            )
             sec_result = []
         else:
-            gdelt_result, sec_result = await __import__('asyncio').gather(
+            google_result, gdelt_result, sec_result = await __import__('asyncio').gather(
+                self.free.google_company(symbol, name),
                 self.free.gdelt_company(symbol, name),
                 self.free.sec_company(symbol, name),
                 return_exceptions=True,
             )
         errors: list[str] = []
+        google_items: list[dict] = []
         gdelt_items: list[dict] = []
         sec_items: list[dict] = []
+        if isinstance(google_result, Exception):
+            errors.append(f"Google News: {google_result}")
+        else:
+            google_items = google_result
         if isinstance(gdelt_result, Exception):
-            errors.append(str(gdelt_result))
+            errors.append(f"GDELT: {gdelt_result}")
         else:
             gdelt_items = gdelt_result
         if isinstance(sec_result, Exception):
-            errors.append(str(sec_result))
+            errors.append(f"SEC: {sec_result}")
         else:
             sec_items = sec_result
 
@@ -260,7 +270,7 @@ class NewsService:
                 continue
             if dt >= cutoff:
                 recent_sec.append(item)
-        items = _dedupe(gdelt_items[:8] + recent_sec[:1])[:6]
+        items = _dedupe(google_items[:8] + gdelt_items[:8] + recent_sec[:1])[:8]
         normalized = [self._normalize_item(x) for x in items]
         reason, reason_type = _fresh_reason(items)
         return {
