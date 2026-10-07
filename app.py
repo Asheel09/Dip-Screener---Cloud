@@ -21,7 +21,7 @@ from services.dip_engine import classify
 
 ROOT = Path(__file__).resolve().parent
 load_dotenv(ROOT / ".env")
-app = FastAPI(title="Meridian Market Dashboard", version="3.3.0")
+app = FastAPI(title="Meridian Market Dashboard", version="3.4.0")
 state = MarketState()
 news = NewsService()
 research = ResearchService(news, state)
@@ -177,7 +177,7 @@ def market_overview(rows: list[dict] | None = None) -> dict:
 
 @app.get("/api/health")
 def health() -> dict:
-    return {"ok": True, "mode": state.provider, "version": "3.3.0", "stream_version": state.version, "updated_at": state.updated_at, "market_status": state.status, "ai_configured": ai.configured, "news_provider": news.provider, "news_live": news.live, "news_status": news.status}
+    return {"ok": True, "mode": state.provider, "version": "3.4.0", "stream_version": state.version, "updated_at": state.updated_at, "market_status": state.status, "ai_configured": ai.configured, "news_provider": news.provider, "news_live": news.live, "news_status": news.status}
 
 @app.get("/api/screeners")
 def screeners(include_disabled: bool = False) -> list[dict]:
@@ -208,7 +208,7 @@ def broad_market() -> dict:
     return market_overview()
 
 @app.get("/api/mover-radar")
-async def mover_radar(region: str = "all", refresh: bool = False) -> dict:
+async def mover_radar(region: str = "us", refresh: bool = False) -> dict:
     try:
         return await state.mover_radar(region=region, force=refresh)
     except ValueError as e:
@@ -225,7 +225,7 @@ async def mover_news(symbol: str, name: str = "", region: str = "US", refresh: b
         "symbol": symbol,
         "name": (name or symbol).strip()[:180],
         "sector": "Unknown",
-        "radar_external": region.lower() != "us",
+        "radar_external": False,
         "radar_fast": True,
     }
     try:
@@ -234,7 +234,8 @@ async def mover_news(symbol: str, name: str = "", region: str = "US", refresh: b
             "symbol": symbol,
             "company_name": bundle.get("company_name") or row["name"],
             "reason": str(bundle.get("overall_cause") or "").strip(),
-            "cause_type": bundle.get("cause_type") or "unclear",
+            "cause_type": bundle.get("cause_type") or "unverified",
+            "reason_verified": bool(bundle.get("overall_cause") and bundle.get("overall_cause") != "No verified catalyst found"),
             "items": (bundle.get("items") or [])[:3],
             "live": bool(bundle.get("live")),
             "searched_at": bundle.get("searched_at"),

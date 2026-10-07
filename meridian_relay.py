@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
-"""Meridian local mover relay (Windows-safe v2).
+"""Meridian local mover relay — v3.4 compatible.
 
-Runs on one ordinary laptop/network, scans TradingView's bulk US and selected
-European equity markets, and securely pushes only the resulting mover rows to
-the Render-hosted Meridian instance. No Meridian server or IBKR Gateway is
-required locally.
+Runs on one ordinary Mac/Windows laptop, scans liquid US-listed stocks through
+TradingView, attaches a *verified* recent catalyst where a relevant free source
+can be found, and pushes the mover snapshot to the Render-hosted Meridian site.
 
-Changes from v1:
-- no ZoneInfo/tzdata dependency on Windows
-- Europe uses TradingView global/scan with multiple supported market codes
-  instead of the invalid /europe/scan endpoint
-- only two scanner calls per cycle: US + Europe
+Design rules in this build:
+- US-listed stocks only (NASDAQ / NYSE / NYSE American families); no Europe.
+- Both gainers and losers are collected in one feed.
+- Every row receives a reason status. If no trustworthy catalyst is found the
+  relay explicitly says "No verified catalyst found" rather than guessing.
+- Mover source links reject common paywalled/community/low-signal sources and
+  point to the underlying article rather than a generic aggregator page.
 """
 from __future__ import annotations
 
@@ -18,30 +19,57 @@ import argparse
 import json
 import math
 import os
+import re
 import sys
 import time
+import unicodedata
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
-from urllib.parse import urlencode
-from xml.etree import ElementTree as ET
-import re
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 TV_BASE = "https://scanner.tradingview.com/{market}/scan"
 GDELT_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
-GOOGLE_NEWS_RSS = "https://news.google.com/rss/search"
-NEWS_CACHE_SECONDS = 900
-NEWS_ENRICH_LIMIT = 15
-_news_cache = {}
-UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/129 Safari/537.36"
-EUROPE_MARKETS = ["france", "germany", "uk", "netherlands", "switzerland", "italy"]
+NEWS_CACHE_SECONDS = 1800
+MOVERS_PER_SIDE = 25
+MIN_ABS_MOVE = 1.5
+MAX_NEWS_WORKERS = 8
+_news_cache: dict[str, tuple[float, dict]] = {}
+UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/129 Safari/537.36"
+
+# Keep the universe useful for the user's US trading workflow without hard-locking
+# it to NASDAQ. NYSE remains important for names such as ORCL, TSM, JPM and LVS.
+US_EXCHANGES = {
+    "NASDAQ", "NYSE", "AMEX", "NYSEARCA", "NYSEAMERICAN",
+}
+
+BLOCKED_DOMAINS = {
+    # Explicitly unsuitable for the user's dashboard or commonly paywalled.
+    "investing.com", "wsj.com", "bloomberg.com", "ft.com", "barrons.com",
+    "marketwatch.com", "seekingalpha.com", "tipranks.com", "thestreet.com",
+    "fool.com", "zacks.com", "stocktwits.com", "reddit.com", "quora.com",
+    "medium.com",
+}
+
+PREFERRED_DOMAINS = {
+    "sec.gov": 100,
+    "prnewswire.com": 90,
+    "businesswire.com": 90,
+    "globenewswire.com": 90,
+    "reuters.com": 80,
+    "cnbc.com": 70,
+    "techcrunch.com": 65,
+    "apnews.com": 65,
+    "nasdaq.com": 60,
+}
+
 COLS = [
     "name", "description", "close", "change", "volume",
     "relative_volume_10d_calc", "market_cap_basic", "currency",
     "premarket_close", "premarket_change", "premarket_volume",
     "postmarket_close", "postmarket_change", "postmarket_volume",
-    "type", "typespecs", "market"
+    "type", "typespecs", "market",
 ]
 
 
@@ -60,11 +88,7 @@ def _nth_sunday(year: int, month: int, nth: int) -> datetime:
 
 
 def _eastern_now() -> datetime:
-    """Current US Eastern time without requiring Windows tzdata.
-
-    US DST: second Sunday in March at 02:00 local standard (07:00 UTC)
-    through first Sunday in November at 02:00 local daylight (06:00 UTC).
-    """
+    """Current US Eastern time without requiring tzdata on Windows."""
     now_utc = datetime.now(timezone.utc)
     y = now_utc.year
     dst_start_day = _nth_sunday(y, 3, 2)
@@ -89,9 +113,15 @@ def us_session() -> str:
     return "CLOSED"
 
 
-def payload(markets, limit=60, premarket_sort=False):
+def payload(limit=60, *, sort_order="asc"):
+    session = us_session()
+    sort_field = (
+        "premarket_change" if session == "PREMARKET"
+        else "postmarket_change" if session == "AFTERHOURS"
+        else "change"
+    )
     return {
-        "markets": list(markets),
+        "markets": ["america"],
         "symbols": {"query": {"types": []}, "tickers": []},
         "options": {"lang": "en"},
         "columns": COLS,
@@ -101,11 +131,7 @@ def payload(markets, limit=60, premarket_sort=False):
             {"left": "market_cap_basic", "operation": "greater", "right": 1_000_000_000},
             {"left": "close", "operation": "greater", "right": 5},
         ],
-        "sort": {
-            "sortBy": "premarket_change" if premarket_sort else "change",
-            "sortOrder": "asc",
-            "nullsFirst": False,
-        },
+        "sort": {"sortBy": sort_field, "sortOrder": sort_order, "nullsFirst": False},
         "range": [0, max(100, min(250, limit * 4))],
         "ignore_unknown_fields": False,
     }
@@ -127,13 +153,12 @@ def post_json(url, obj, headers=None, timeout=20):
         return json.loads(r.read().decode("utf-8"))
 
 
-def scan(endpoint_market, markets, region, limit=60):
-    session = us_session() if region == "US" else "REGULAR"
-    pre = region == "US" and session == "PREMARKET"
-    aft = region == "US" and session == "AFTERHOURS"
-
-    pl = payload(markets, limit, premarket_sort=pre)
-    body = post_json(TV_BASE.format(market=endpoint_market), pl)
+def scan(*, sort_order: str, limit: int = MOVERS_PER_SIDE):
+    session = us_session()
+    pre = session == "PREMARKET"
+    aft = session == "AFTERHOURS"
+    pl = payload(limit, sort_order=sort_order)
+    body = post_json(TV_BASE.format(market="america"), pl)
     idx = {c: i for i, c in enumerate(COLS)}
     out = []
 
@@ -146,6 +171,10 @@ def scan(endpoint_market, markets, region, limit=60):
         def v(k):
             i = idx[k]
             return vals[i] if i < len(vals) else None
+
+        exchange = ref.split(":", 1)[0].upper() if ":" in ref else ""
+        if exchange not in US_EXCHANGES:
+            continue
 
         ticker = str(v("name") or ref.split(":")[-1]).strip()
         name = str(v("description") or ticker).strip()
@@ -169,22 +198,24 @@ def scan(endpoint_market, markets, region, limit=60):
             ext = ac
             vol = num(v("postmarket_volume"))
         else:
-            row_session = "REGULAR" if region != "US" or session == "REGULAR" else "PREVIOUS_CLOSE"
+            row_session = "REGULAR" if session == "REGULAR" else "PREVIOUS_CLOSE"
             move = reg
             reference = close
             ext = None
             vol = num(v("volume"))
 
-        if move is None or move > -1.5:
+        if move is None or abs(move) < MIN_ABS_MOVE:
+            continue
+        if sort_order == "asc" and move >= 0:
+            continue
+        if sort_order == "desc" and move <= 0:
             continue
 
-        ex = ref.split(":", 1)[0] if ":" in ref else ""
-        source_market = str(v("market") or "")
         out.append({
             "symbol": ticker,
             "name": name,
-            "region": region,
-            "exchange": ex,
+            "region": "US",
+            "exchange": exchange,
             "move": round(move, 3),
             "price": reference,
             "extended_price": ext,
@@ -198,14 +229,18 @@ def scan(endpoint_market, markets, region, limit=60):
             "volume": vol,
             "relative_volume": num(v("relative_volume_10d_calc")),
             "tv_symbol": ref,
-            "source_market": source_market,
+            "source_market": str(v("market") or ""),
         })
 
-    return sorted(out, key=lambda x: x["move"])[:limit]
+    out.sort(key=lambda x: x["move"], reverse=(sort_order == "desc"))
+    return out[:limit]
 
 
 def clean_company_name(name: str, symbol: str = "") -> str:
-    x = re.sub(r"\b(holdings?|incorporated|inc|corporation|corp|company|co|plc|ltd|limited|sa|se|ag|nv)\b\.?", " ", str(name or symbol), flags=re.I)
+    x = re.sub(
+        r"\b(holdings?|incorporated|inc|corporation|corp|company|co|plc|ltd|limited|sa|se|ag|nv|group|class a|class b)\b\.?",
+        " ", str(name or symbol), flags=re.I,
+    )
     x = re.sub(r"[^A-Za-z0-9&' -]+", " ", x)
     return re.sub(r"\s+", " ", x).strip(" ,-. ") or symbol
 
@@ -213,18 +248,79 @@ def clean_company_name(name: str, symbol: str = "") -> str:
 def classify_catalyst(headline: str) -> str:
     t = str(headline or "").lower()
     rules = [
-        ("earnings", ("earnings", "quarter", "revenue", "profit", "eps", "results")),
-        ("guidance", ("guidance", "forecast", "outlook", "raises forecast", "cuts forecast", "profit warning")),
-        ("regulatory", ("regulator", "antitrust", "lawsuit", "export control", "sanction", "tariff", "investigation", "fine")),
-        ("analyst", ("upgrade", "downgrade", "price target", "rating", "outperform", "underperform")),
+        ("earnings", ("earnings", "quarter", "revenue", "profit", "eps", "results", "sales rise", "sales fall")),
+        ("guidance", ("guidance", "forecast", "outlook", "raises forecast", "cuts forecast", "profit warning", "expects")),
+        ("clinical", ("fda", "clinical", "trial", "phase 1", "phase 2", "phase 3", "drug", "endpoint", "patient", "approval")),
+        ("regulatory", ("regulator", "antitrust", "lawsuit", "export control", "sanction", "tariff", "investigation", "fine", "subpoena")),
+        ("analyst", ("upgrade", "downgrade", "price target", "rating", "outperform", "underperform", "initiates")),
         ("supply-demand", ("capacity", "production", "supply", "shortage", "demand", "pricing pressure", "competitor", "inventory")),
-        ("product", ("launch", "unveil", "release", "product", "chip", "platform", "model")),
-        ("corporate", ("acquisition", "merger", "takeover", "deal", "buyback", "dividend", "ceo", "offering", "debt", "stake")),
+        ("product", ("launch", "unveil", "release", "product", "chip", "platform", "model", "contract", "order", "partnership")),
+        ("corporate", ("acquisition", "merger", "takeover", "deal", "buyback", "dividend", "ceo", "offering", "debt", "stake", "bankruptcy", "layoff", "restructur")),
     ]
     for label, words in rules:
         if any(w in t for w in words):
             return label
     return "unclear"
+
+
+def _domain(url: str, fallback: str = "") -> str:
+    try:
+        host = (urlparse(url).hostname or "").lower().removeprefix("www.")
+        return host or str(fallback or "").lower().removeprefix("www.")
+    except Exception:
+        return str(fallback or "").lower().removeprefix("www.")
+
+
+def _domain_matches(domain: str, target: str) -> bool:
+    return domain == target or domain.endswith("." + target)
+
+
+def source_allowed(url: str, supplied_domain: str = "") -> bool:
+    if not re.match(r"^https?://", str(url or ""), flags=re.I):
+        return False
+    d = _domain(url, supplied_domain)
+    if not d:
+        return False
+    return not any(_domain_matches(d, b) for b in BLOCKED_DOMAINS)
+
+
+def _headline_has_emoji(headline: str) -> bool:
+    return any(unicodedata.category(ch) == "So" for ch in headline)
+
+
+def headline_relevant(headline: str, company: str, symbol: str) -> bool:
+    h = re.sub(r"\s+", " ", str(headline or "")).strip()
+    low = h.lower()
+    if not h:
+        return False
+    # Reject community-style / opinion-style snippets such as the ABSI example.
+    if _headline_has_emoji(h):
+        return False
+    if re.search(r"\b(i|i'm|i’ve|i've|my|me|we|we're|we’ve|we've|our)\b", low):
+        return False
+    if any(x in low for x in ("reddit", "stocktwits", "forum post", "message board", "should you buy", "is it time to buy", "my portfolio")):
+        return False
+
+    qname = clean_company_name(company, symbol)
+    if qname and qname.lower() in low:
+        return True
+    if len(symbol) >= 3 and re.search(rf"(?<![A-Z0-9]){re.escape(symbol.upper())}(?![A-Z0-9])", h.upper()):
+        return True
+    ignore = {"the", "and", "class", "group", "holdings", "technology", "technologies", "systems", "international"}
+    tokens = [t.lower() for t in re.findall(r"[A-Za-z0-9]+", qname) if len(t) >= 4 and t.lower() not in ignore]
+    return bool(tokens and any(t in low for t in tokens[:3]))
+
+
+def source_score(url: str, supplied_domain: str = "") -> int:
+    d = _domain(url, supplied_domain)
+    score = 30
+    for target, value in PREFERRED_DOMAINS.items():
+        if _domain_matches(d, target):
+            score = max(score, value)
+    low = str(url or "").lower()
+    if any(x in low for x in ("/investor", "/investors", "/newsroom", "/press-release", "/press_releases")):
+        score = max(score, 85)
+    return score
 
 
 def get_json(url, params=None, timeout=12):
@@ -235,118 +331,117 @@ def get_json(url, params=None, timeout=12):
         return json.loads(r.read().decode("utf-8"))
 
 
-def _gdelt_reason(symbol: str, company: str):
+def _gdelt_reason(symbol: str, company: str) -> dict:
     qname = clean_company_name(company, symbol)
     query = f'"{qname}" sourcelang:english'
     body = get_json(GDELT_URL, {
-        "query": query, "mode": "ArtList", "maxrecords": 12,
-        "format": "json", "sort": "DateDesc", "timespan": "3d"
+        "query": query,
+        "mode": "ArtList",
+        "maxrecords": 30,
+        "format": "json",
+        "sort": "DateDesc",
+        "timespan": "3d",
     })
+    candidates = []
     for a in body.get("articles") or []:
         headline = re.sub(r"\s+", " ", str(a.get("title") or "")).strip()
-        if not headline:
+        url = str(a.get("url") or "").strip()
+        supplied_domain = str(a.get("domain") or "").strip()
+        if not headline_relevant(headline, company, symbol):
+            continue
+        if not source_allowed(url, supplied_domain):
             continue
         kind = classify_catalyst(headline)
         if kind == "unclear":
             continue
-        return {
+        score = source_score(url, supplied_domain)
+        # Prefer newer results when source quality is otherwise comparable.
+        seen = str(a.get("seendate") or "")
+        candidates.append((score, seen, {
             "reason": headline[:180],
             "cause_type": kind,
-            "news_url": str(a.get("url") or ""),
-            "news_source": str(a.get("domain") or "GDELT-indexed source"),
-            "news_published_at": str(a.get("seendate") or ""),
-        }
-    return {}
-
-
-def _google_reason(symbol: str, company: str):
-    qname = clean_company_name(company, symbol)
-    params = {"q": f'"{qname}" when:3d', "hl": "en-US", "gl": "US", "ceid": "US:en"}
-    url = GOOGLE_NEWS_RSS + "?" + urlencode(params)
-    req = Request(url, headers={"User-Agent": UA, "Accept": "application/rss+xml,application/xml,text/xml,*/*"})
-    with urlopen(req, timeout=12) as r:
-        root = ET.fromstring(r.read())
-    for item in root.findall(".//item")[:12]:
-        title = re.sub(r"\s+", " ", (item.findtext("title") or "")).strip()
-        if not title:
-            continue
-        # Google RSS appends publisher with ' - Publisher'; keep the catalyst text concise.
-        headline = re.sub(r"\s+-\s+[^-]{2,80}$", "", title).strip() or title
-        kind = classify_catalyst(headline)
-        if kind == "unclear":
-            continue
-        return {
-            "reason": headline[:180],
-            "cause_type": kind,
-            "news_url": (item.findtext("link") or "").strip(),
-            "news_source": "Google News",
-            "news_published_at": (item.findtext("pubDate") or "").strip(),
-        }
-    return {}
+            "news_url": url,
+            "news_source": _domain(url, supplied_domain) or "source",
+            "news_published_at": seen,
+            "reason_verified": True,
+        }))
+    if not candidates:
+        return {}
+    candidates.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    return candidates[0][2]
 
 
 def fetch_reason(row: dict) -> dict:
-    key = str(row.get("tv_symbol") or f"{row.get('region')}:{row.get('symbol')}")
+    key = str(row.get("tv_symbol") or f"US:{row.get('symbol')}")
     now = time.time()
     cached = _news_cache.get(key)
-    if cached:
-        ttl = NEWS_CACHE_SECONDS if cached[1] else 300
-        if now - cached[0] < ttl:
-            return dict(cached[1])
-    result = {}
+    if cached and now - cached[0] < NEWS_CACHE_SECONDS:
+        return dict(cached[1])
     try:
         result = _gdelt_reason(str(row.get("symbol") or ""), str(row.get("name") or ""))
     except Exception:
         result = {}
     if not result:
-        try:
-            result = _google_reason(str(row.get("symbol") or ""), str(row.get("name") or ""))
-        except Exception:
-            result = {}
+        result = {
+            "reason": "No verified catalyst found",
+            "cause_type": "unverified",
+            "news_url": "",
+            "news_source": "",
+            "news_published_at": "",
+            "reason_verified": False,
+        }
     _news_cache[key] = (now, dict(result))
     return result
 
 
 def enrich_reasons(rows):
-    # News lookup is only for the largest movers; smaller rows remain blank rather than speculative.
-    targets = [r for r in rows if num(r.get("move")) is not None and num(r.get("move")) <= -3][:NEWS_ENRICH_LIMIT]
-    if not targets:
+    if not rows:
         return rows
-    with ThreadPoolExecutor(max_workers=min(5, len(targets))) as pool:
-        jobs = {pool.submit(fetch_reason, row): row for row in targets}
+    with ThreadPoolExecutor(max_workers=min(MAX_NEWS_WORKERS, len(rows))) as pool:
+        jobs = {pool.submit(fetch_reason, row): row for row in rows}
         for job in as_completed(jobs):
             row = jobs[job]
             try:
                 row.update(job.result())
             except Exception:
-                pass
+                row.update({
+                    "reason": "No verified catalyst found",
+                    "cause_type": "unverified",
+                    "news_url": "",
+                    "news_source": "",
+                    "news_published_at": "",
+                    "reason_verified": False,
+                })
     return rows
 
 
 def collect():
-    rows = []
     errors = []
-    jobs = [
-        ("america", ["america"], "US"),
-        ("global", EUROPE_MARKETS, "Europe"),
-    ]
-    for endpoint_market, markets, region in jobs:
-        try:
-            rows.extend(scan(endpoint_market, markets, region))
-        except Exception as e:
-            errors.append(f"{region}: {e}")
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        jobs = {
+            pool.submit(scan, sort_order="asc", limit=MOVERS_PER_SIDE): "losers",
+            pool.submit(scan, sort_order="desc", limit=MOVERS_PER_SIDE): "gainers",
+        }
+        sides = {"losers": [], "gainers": []}
+        for job in as_completed(jobs):
+            side = jobs[job]
+            try:
+                sides[side] = job.result()
+            except Exception as e:
+                errors.append(f"US {side}: {e}")
 
     seen = set()
     merged = []
-    for x in sorted(rows, key=lambda x: x["move"]):
-        k = x.get("tv_symbol") or f"{x['region']}:{x['symbol']}"
+    # Default presentation: largest absolute moves first, regardless of sign.
+    for x in sorted(sides["losers"] + sides["gainers"], key=lambda r: abs(float(r["move"])), reverse=True):
+        k = x.get("tv_symbol") or f"US:{x['symbol']}"
         if k in seen:
             continue
         seen.add(k)
         merged.append(x)
-        if len(merged) >= 100:
-            break
     enrich_reasons(merged)
+    for i, row in enumerate(merged, 1):
+        row["rank"] = i
     return merged, errors
 
 
@@ -354,7 +449,7 @@ def push(base, token, rows):
     url = base.rstrip("/") + "/api/relay/movers"
     return post_json(
         url,
-        {"rows": rows, "source": "work-laptop-tradingview", "collected_at": time.time()},
+        {"rows": rows, "source": "personal-mac-tradingview", "collected_at": time.time()},
         {
             "X-Meridian-Relay-Token": token,
             "Origin": base.rstrip("/"),
@@ -364,7 +459,7 @@ def push(base, token, rows):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Push local mover scans to cloud Meridian")
+    ap = argparse.ArgumentParser(description="Push local US mover scans to cloud Meridian")
     ap.add_argument("--url", default=os.getenv("MERIDIAN_URL", ""))
     ap.add_argument("--token", default=os.getenv("MERIDIAN_RELAY_TOKEN", ""))
     ap.add_argument("--interval", type=int, default=90)
@@ -375,16 +470,17 @@ def main():
         print("Need --url and --token (or MERIDIAN_URL / MERIDIAN_RELAY_TOKEN).", file=sys.stderr)
         return 2
 
-    print("Meridian relay v3 started. Ctrl+C stops it.")
-    print("US source: TradingView america | Europe source: TradingView global (FR/DE/UK/NL/CH/IT) | Reasons: local GDELT/Google News")
+    print("Meridian relay v3.4 started. Ctrl+C stops it.")
+    print("US movers: TradingView · gainers + losers · verified free-source catalysts via GDELT")
 
     while True:
         try:
             rows, errors = collect()
             res = push(a.url, a.token, rows)
+            verified = sum(1 for r in rows if r.get("reason_verified"))
             print(
                 datetime.now().strftime("%H:%M:%S"),
-                f"uploaded {len(rows)} movers",
+                f"uploaded {len(rows)} movers · {verified} verified catalysts",
                 (" | " + "; ".join(errors) if errors else ""),
                 res,
             )

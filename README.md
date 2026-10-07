@@ -1,25 +1,35 @@
-# Meridian Market Dashboard v3.0 Cloud
+# Meridian Market Dashboard v3.4 Cloud
 
-Meridian v3.0 is the cloud-first version of the market-move scanner. Deploy it once, then open the same password-protected URL from a work laptop, personal laptop, tablet or phone. The primary scanner no longer requires IBKR Client Portal Gateway.
+Meridian is a cloud-hosted market-move dashboard with a lightweight optional personal-laptop relay. The Render URL stays online independently; the relay supplies fresher US mover discovery and verified catalyst links while it is running.
 
-## What Meridian is optimized for
+## What v3.4 is optimized for
 
-The first-stage question is **“What fell hard today, and why?”**
+The main question is **“What is moving hard today, and is there a verified reason?”**
 
-- **Mover Radar** discovers large downside movers across the US and major European markets.
-- **Free news research** checks GDELT, SEC EDGAR and official macro feeds for a plausible catalyst.
-- **Live Dips / Broad Market** keep a compact core set of priority names and market proxies available without trying to poll 500+ hard-coded symbols continuously.
-- **Recovery research** loads real five-year price history on demand; synthetic analogue tables are not used.
+- **Movers** scans US-listed stocks and combines large gainers and losers in one table.
+- **Catalyst checks** use free public sources and reject common paywalls, community posts and obviously irrelevant headlines.
+- Every mover has an explicit status: a sourced catalyst or **No verified catalyst found**.
+- **Stock News** is company-specific and starts from the current Movers list.
+- **Broad Market** is deliberately compact: major index ETFs plus clearly labelled US sector ETFs.
+- **Watchlist** and **Backtests** remain available.
 
-## Workday price policy
+Removed from navigation in v3.4: Live Dips, Comparable Drops, AI Research and Customize.
 
-Meridian deliberately does not pretend every number is a live regular-session trade.
+## Mover universe and sorting
 
-- **US before 09:30 ET:** the main/reference price is the previous regular close. If Yahoo supplies premarket data, Mover Radar shows the premarket price and premarket % change separately.
-- **US 09:30–16:00 ET:** use the latest regular-session Yahoo market data available.
-- **US after hours:** the regular close remains the reference, with an extended-hours move shown separately when available.
-- **Europe while open:** use Yahoo's latest exchange quote and show `exchangeDataDelayedBy` when supplied (many major European venues are delayed roughly 15–30 minutes).
-- **Closed markets:** previous-close values are labeled as references, never as live trades.
+The active mover workflow is US-only. It includes major NASDAQ, NYSE and NYSE-American families rather than hard-locking the dashboard to NASDAQ, because relevant US names can trade on either major exchange. Use the exchange chips if you only want NASDAQ.
+
+Movers includes both positive and negative moves. Default order is the largest absolute move first. The Move column cycles **Default → Desc → Asc → Default**, so Desc puts the largest gainers first and Asc puts the largest losers first.
+
+## Catalyst source policy
+
+The personal relay uses GDELT to discover direct publisher URLs, then applies relevance and source-quality checks. It rejects common paywalled/low-signal/community domains such as Investing.com, WSJ, Bloomberg, FT, Barron's, MarketWatch, Seeking Alpha, TipRanks, Motley Fool, Zacks, Stocktwits and Reddit.
+
+A headline must actually relate to the company before it can become the stated reason. First-person/community-style text is rejected. If no suitable material catalyst is found, Meridian does not invent one.
+
+## Recoverability
+
+There is no recoverability bar in the Movers table in v3.4. A single number would look precise without being reliable for arbitrary newly discovered stocks. Historical recovery evidence is still shown where Meridian has enough real history, but it is not generalized into a score for every mover.
 
 ## Cloud defaults
 
@@ -29,81 +39,33 @@ NEWS_PROVIDER=free
 YAHOO_CORE_REFRESH_SECONDS=300
 SEC_USER_AGENT=Meridian your-real-email@example.com
 MERIDIAN_PASSWORD=choose-a-password
+MERIDIAN_RELAY_TOKEN=use-a-long-random-value
 ```
 
-`OPENAI_API_KEY` remains optional. It is not needed for Mover Radar, prices, recovery history or the free news pipeline.
+No OpenAI API key is required for the v3.4 UI.
 
-## Local run (optional)
+## Personal Mac relay
+
+Put the updated `meridian_relay_v3.py` beside your `start_meridian.command` launcher. The launcher can continue using the same Render URL and relay token.
+
+Manual Terminal launch is also supported:
 
 ```bash
-python -m venv .venv
-# Windows PowerShell
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-copy .env.example .env
-.\.venv\Scripts\python.exe -m uvicorn app:app --host 0.0.0.0 --port 8000
+export MERIDIAN_URL="https://YOUR-SERVICE.onrender.com"
+export MERIDIAN_RELAY_TOKEN="YOUR_RELAY_TOKEN"
+python3 meridian_relay_v3.py
 ```
 
-Open `http://127.0.0.1:8000`.
+The relay scans about every 90 seconds. If the Mac sleeps or the Terminal process stops, the Render site remains available but the mover snapshot stops refreshing and is marked stale after 10 minutes.
 
-## Cloud deployment
+## Deploying the site update
 
-See **`CLOUD_DEPLOY.md`**. The repository includes:
-
-- `Dockerfile`
-- `render.yaml` configured for a Render Free web service
-- `/api/health` health check
-- optional `MERIDIAN_PASSWORD` cookie login
-- WebSocket client heartbeat for an actively-open dashboard
-
-## Free data sources
-
-### Market discovery / prices
-Yahoo Finance via `yfinance`.
-
-### News / catalysts
-- GDELT DOC API
-- SEC EDGAR
-- Federal Reserve feeds
-- BLS feeds
-
-## Persistence on a free host
-
-Render Free has an ephemeral filesystem. Meridian therefore treats local history/news files as rebuildable caches. A restart or redeploy can reset runtime settings and caches, but the scanner itself continues to work from public market/news sources.
-
-Your Git repository becomes the master copy for future Meridian updates.
-
-## When can I delete the laptop copy?
-
-Only after:
-
-1. Render says the deployment is **Live**.
-2. `/api/health` reports version `3.3.0`.
-3. Mover Radar returns real Yahoo US/European results.
-4. The same URL works from a second device.
-
-Once those four checks pass, the local project folder is not required to run Meridian. Keep the cloud source repository.
-
-## Legacy IBKR mode
-
-The v2.x IBKR code remains in the project for fallback/testing. To use it locally, set `MARKET_DATA_PROVIDER=ibkr` and run an authenticated Client Portal Gateway. It is no longer the recommended cloud scanner architecture.
+Replace the v3.3 project files with the v3.4 patch (or use the full v3.4 folder), commit and push to the private Git repository connected to Render. After deployment, `/api/health` should report version `3.4.0`.
 
 ## Tests
 
 ```bash
-python -m unittest discover -s tests -v
+PYTHONPATH=. pytest -q
 ```
 
-
-## Local mover relay (free cloud workaround)
-
-Render shared IPs can be rate-limited by anonymous Yahoo/TradingView endpoints. Meridian v3.2 can therefore accept mover snapshots from one lightweight local collector while the dashboard itself remains hosted on Render.
-
-1. Add `MERIDIAN_RELAY_TOKEN` in Render Environment. Use a long random value.
-2. Download only `meridian_relay.py` onto the work laptop.
-3. Run:
-
-```powershell
-python meridian_relay.py --url https://YOUR-SERVICE.onrender.com --token YOUR_RELAY_TOKEN
-```
-
-The collector scans about every 90 seconds and uploads only mover rows. Phones and other computers still need only the Render URL. Stop it with Ctrl+C. If the relay stops, Meridian keeps the last snapshot and labels it stale after 10 minutes.
+The v3.4 package includes tests for the trimmed navigation, US-only two-sided mover scan, relay filtering and catalyst-source safeguards.

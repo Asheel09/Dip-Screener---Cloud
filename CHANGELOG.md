@@ -69,3 +69,8 @@ See `CHANGELOG_V3_2.md`.
 
 ## v3.3
 - Relay-side catalyst/news enrichment for Mover Radar so Render does not need to rediscover reasons from blocked cloud IPs.
+## v3.4
+- US-only Movers table with gainers + losers, sorting/filtering, all-row catalyst status, safer free-source links, Stock News redesign, compact Broad Market, and clearer button states.
+- Removed Live Dips, Comparable Drops, AI Research and Customize from navigation.
+- Recoverability was intentionally not added to Movers because arbitrary-mover historical evidence is not yet reliable enough for a defensible score.
+

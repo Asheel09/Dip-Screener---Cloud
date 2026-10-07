@@ -1,0 +1,9 @@
+Meridian v3.3 -> v3.4
+
+1. Copy the patch ZIP contents over the root of your existing Meridian Git repository and replace matching files.
+2. Commit + push. Render should redeploy automatically.
+3. Confirm /api/health reports version 3.4.0.
+4. On your Mac, replace the old meridian_relay_v3.py with the separately supplied v3.4 relay file. Your existing start_meridian.command launcher can stay unchanged.
+5. Start the Mac relay and open Movers. You should see US gainers + losers and either a verified catalyst/source or "No verified catalyst found" on every row.
+
+Recoverability is intentionally NOT shown as a Movers score in v3.4 because arbitrary mover history is not consistent enough to make the number trustworthy.
