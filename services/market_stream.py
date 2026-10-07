@@ -6,6 +6,7 @@ from .ibkr_webapi import IBKRWebAPI
 from .yahoo_market import YahooMarketAPI
 from .tradingview_market import TradingViewMoverAPI
 from .recovery_engine import analyse_recovery
+from .free_news import source_allowed, company_headline_relevant
 
 ROOT=Path(__file__).resolve().parents[1]
 HISTORY_CACHE=ROOT/'data'/'market_history_cache.json'
@@ -193,9 +194,21 @@ class MarketState:
                 continue
             if not symbol or not (-100 < move < 100):
                 continue
+            if not region.lower().startswith('us'):
+                continue
+            reason=str(raw.get('reason') or '').strip()[:180]
+            news_url=str(raw.get('news_url') or '').strip()[:1200]
+            verified=bool(raw.get('reason_verified'))
+            # Do not blindly trust an older relay: enforce the same source and relevance
+            # rules server-side before showing a headline as a verified reason.
+            if verified and reason and reason != 'No verified catalyst found':
+                verified = source_allowed(news_url, str(raw.get('news_source') or '')) and company_headline_relevant(reason, name, symbol)
+            if not verified:
+                reason='No verified catalyst found'
+                news_url=''
             row={
                 'symbol':symbol,'name':name,'region':region,
-                'region_code':'us' if region.lower().startswith('us') else 'europe',
+                'region_code':'us',
                 'exchange':str(raw.get('exchange') or '')[:32],
                 'move':round(move,3),'scanner_value':f'{move:.2f}%',
                 'price':raw.get('price'),'extended_price':raw.get('extended_price'),
@@ -205,14 +218,15 @@ class MarketState:
                 'currency':str(raw.get('currency') or '')[:12],'market_cap':raw.get('market_cap'),
                 'volume':raw.get('volume'),'relative_volume':raw.get('relative_volume'),
                 'tv_symbol':str(raw.get('tv_symbol') or '')[:80],
-                'reason':str(raw.get('reason') or '')[:180],
-                'cause_type':str(raw.get('cause_type') or '')[:40],
-                'news_url':str(raw.get('news_url') or '')[:1200],
-                'news_source':str(raw.get('news_source') or '')[:120],
-                'news_published_at':str(raw.get('news_published_at') or '')[:120],
+                'reason':reason,
+                'cause_type':str(raw.get('cause_type') or 'unverified')[:40] if verified else 'unverified',
+                'news_url':news_url,
+                'news_source':str(raw.get('news_source') or '')[:120] if verified else '',
+                'news_published_at':str(raw.get('news_published_at') or '')[:120] if verified else '',
+                'reason_verified':verified,
             }
             clean.append(row)
-        clean.sort(key=lambda x: float(x.get('move') or 999))
+        clean.sort(key=lambda x: abs(float(x.get('move') or 0)), reverse=True)
         for i,row in enumerate(clean,1): row['rank']=i
         ts=float(collected_at or now)
         self._relay_movers={'rows':clean,'source':source,'collected_at':ts,'received_at':now}
@@ -223,29 +237,29 @@ class MarketState:
         relay=self._relay_movers
         if not relay: return None
         rows=relay.get('rows') or []
-        if region=='us': rows=[x for x in rows if x.get('region_code')=='us']
-        elif region=='europe': rows=[x for x in rows if x.get('region_code')=='europe']
+        rows=[x for x in rows if x.get('region_code')=='us']
         age=max(0,time.time()-float(relay.get('collected_at') or 0))
         stale=age>600
         return {
             'provider':'local-relay','region':region,'rows':rows[:60],
-            'errors':(['Local relay snapshot is stale; start the work-laptop collector for fresh mover data.'] if stale else []),
+            'errors':(['Local relay snapshot is stale; start the Meridian relay on your Mac for fresh mover data.'] if stale else []),
             'updated_at':float(relay.get('collected_at') or 0),'received_at':float(relay.get('received_at') or 0),
             'age_seconds':round(age,1),'stale':stale,'cached':True,
             'session_note':'Mover data collected from the local Meridian relay and pushed securely to Render.'
         }
 
-    async def mover_radar(self, region: str = "all", *, force: bool = False) -> dict:
+    async def mover_radar(self, region: str = "us", *, force: bool = False) -> dict:
         region=region.lower().strip()
-        if region not in {"all","us","europe"}:
-            raise ValueError("region must be all, us, or europe")
+        if region not in {"all","us"}:
+            raise ValueError("Mover Radar is US-only in Meridian v3.4")
+        region='us'
         if self.provider == "yahoo":
             relay=self._relay_scan(region)
             if relay is not None:
                 return relay
             # Render/shared cloud IPs are often throttled by Yahoo's screener.
             # Use TradingView's bulk market scanner first; Yahoo remains a fallback.
-            limit=60 if region=='all' else 45
+            limit=50
             if not self._tradingview:
                 self._tradingview=TradingViewMoverAPI()
             tv = await self._tradingview.run_mover_scan(region, limit=limit, force=force)
@@ -263,14 +277,14 @@ class MarketState:
                 return tv
         if self.provider != "ibkr":
             rows=[x for x in self.snapshot() if x.get("kind","stock")=="stock"]
-            rows=sorted(rows,key=lambda x:float(x.get("day",0)))[:35]
-            return {"provider":"demo","region":region,"rows":[{"rank":i+1,"symbol":x["symbol"],"name":x.get("name",x["symbol"]),"region":"US","move":x.get("day"),"exchange":"DEMO","conid":0} for i,x in enumerate(rows)],"cached":False,"updated_at":time.time()}
+            rows=sorted(rows,key=lambda x:abs(float(x.get("day",0))),reverse=True)[:35]
+            return {"provider":"demo","region":region,"rows":[{"rank":i+1,"symbol":x["symbol"],"name":x.get("name",x["symbol"]),"region":"US","move":x.get("day"),"exchange":"DEMO","conid":0,"reason":"No verified catalyst found","cause_type":"unverified","reason_verified":False} for i,x in enumerate(rows)],"cached":False,"updated_at":time.time()}
         if not self._ibkr:
             raise RuntimeError("IBKR is still connecting. Wait for the dashboard status to show connected, then refresh Mover Radar.")
         now=time.time(); cache=self._mover_cache.get(region)
         if not force and cache and now-cache[0] < 30:
             return {**cache[1],"cached":True}
-        regions=[region] if region!="all" else ["us","europe"]
+        regions=['us']
         scans=[]; errors=[]
         for idx,r in enumerate(regions):
             try:
@@ -286,7 +300,7 @@ class MarketState:
         def mv(x):
             try:return float(x.get("move"))
             except Exception:return 999.0
-        merged.sort(key=mv)
+        merged.sort(key=lambda x:abs(mv(x)),reverse=True)
         # De-duplicate by contract id first, then region+symbol.
         seen=set(); rows=[]
         for x in merged:
@@ -335,7 +349,7 @@ class MarketState:
                     self.version+=1; self.updated_at=time.time()
                 self.connection_state='LIVE' if changed else ('CONNECTED' if self.ready_symbols else 'WAITING')
                 sess=self._yahoo.us_session()
-                self.connection_message=f'Cloud market data · {sess} · {len(self.ready_symbols)} core instruments ready · TradingView Mover Radar available'
+                self.connection_message=f'Cloud market data · {sess} · {len(self.ready_symbols)} core instruments ready · TradingView Movers available'
                 self.last_error=None; backoff=15.0
                 # Daily/reference core data does not need per-second polling. The browser
                 # still receives WebSocket state; global mover scans cache for two minutes.

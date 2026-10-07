@@ -59,8 +59,8 @@ def _fresh_reason(items: list[dict], *, hours: int = 72) -> tuple[str, str]:
             continue
         headline = str(item.get("headline") or "").strip()
         if headline:
-            return headline[:180], "company"
-    return "", "unclear"
+            return headline[:180], kind
+    return "No verified catalyst found", "unverified"
 
 
 def _extract_text(payload: dict) -> str:
@@ -179,6 +179,8 @@ class NewsService:
         normalized = [self._normalize_item(x) for x in items]
         return {
             "description": description,
+            "overall_cause": "No verified catalyst found",
+            "cause_type": "unverified",
             "items": normalized,
             "provider": "demo",
             "live": False,

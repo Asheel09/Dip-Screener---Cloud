@@ -110,8 +110,10 @@ class YahooMarketAPI:
                 response = yf.screen(q, offset=offset, size=250, sortField="intradaymarketcap", sortAsc=False) or {}
                 quotes.extend(response.get("quotes") or [])
         else:
-            response = yf.screen(q, size=size, sortField="percentchange", sortAsc=True) or {}
-            quotes = response.get("quotes") or []
+            # Pull both tails so the fallback can show gainers and losers together.
+            lo = yf.screen(q, size=max(40, min(125, limit * 2)), sortField="percentchange", sortAsc=True) or {}
+            hi = yf.screen(q, size=max(40, min(125, limit * 2)), sortField="percentchange", sortAsc=False) or {}
+            quotes = [*(lo.get("quotes") or []), *(hi.get("quotes") or [])]
         rows: list[dict] = []
         blocked = (" ETF", " FUND", " PROSHARES", " ISHARES", " SPDR", " DIREXION", " ULTRAPRO", " 2X ", " 3X ")
         for raw in quotes:
@@ -122,8 +124,7 @@ class YahooMarketAPI:
             session, move, reference_price, extended_price = self._screen_move(raw)
             if move is None:
                 continue
-            # Mover Radar is for meaningful downside dislocations, not every red name.
-            if move > -1.5:
+            if abs(move) < 1.5:
                 continue
             rows.append({
                 "symbol": symbol,
@@ -146,19 +147,20 @@ class YahooMarketAPI:
                 "volume": _num(raw.get("regularMarketVolume")),
                 "avg_volume": _num(raw.get("averageDailyVolume3Month")),
             })
-        rows.sort(key=lambda x: float(x.get("move") or 999))
+        rows.sort(key=lambda x: abs(float(x.get("move") or 0)), reverse=True)
         return rows[:limit]
 
     async def run_mover_scan(self, region: str, *, limit: int = 40, force: bool = False) -> dict:
         region = region.lower().strip()
-        if region not in {"all", "us", "europe"}:
-            raise ValueError("region must be all, us, or europe")
+        if region not in {"all", "us"}:
+            raise ValueError("Mover Radar is US-only in Meridian v3.4")
+        region = "us"
         now = time.time()
         cached = self._scan_cache.get(region)
         if not force and cached and now - cached[0] < self.scan_cache_seconds:
             return {**cached[1], "cached": True}
 
-        region_codes = ["us"] if region == "us" else (EUROPE_REGIONS if region == "europe" else ["us", *EUROPE_REGIONS])
+        region_codes = ["us"]
         all_rows: list[dict] = []
         errors: list[str] = []
         # Sequential calls are gentler on Yahoo and plenty fast at a 2-minute cache cadence.
@@ -172,7 +174,7 @@ class YahooMarketAPI:
         # de-duplicate ADR / same-symbol duplicates conservatively by region+symbol
         seen: set[str] = set()
         rows: list[dict] = []
-        for item in sorted(all_rows, key=lambda x: float(x.get("move") or 999)):
+        for item in sorted(all_rows, key=lambda x: abs(float(x.get("move") or 0)), reverse=True):
             key = f"{item.get('region_code')}:{item.get('symbol')}"
             if key in seen:
                 continue
@@ -188,7 +190,7 @@ class YahooMarketAPI:
             "rows": rows,
             "errors": errors,
             "updated_at": now,
-            "session_note": "US premarket uses premarket change when Yahoo supplies it; otherwise closed US names show the previous regular-session move. European rows use the latest exchange quote available to Yahoo.",
+            "session_note": "US-only fallback. Both positive and negative movers are ranked by absolute move; extended-session prices are labeled explicitly when available.",
         }
         self._scan_cache[region] = (now, result)
         return {**result, "cached": False}

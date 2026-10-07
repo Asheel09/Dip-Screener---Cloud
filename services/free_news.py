@@ -5,6 +5,8 @@ import hashlib
 import html
 import os
 import re
+import unicodedata
+from urllib.parse import urlparse
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any
@@ -24,6 +26,18 @@ OFFICIAL_FEEDS = [
 ]
 
 MATERIAL_FORMS = {"8-K", "8-K/A", "10-Q", "10-Q/A", "10-K", "10-K/A", "6-K", "20-F", "40-F"}
+
+BLOCKED_NEWS_DOMAINS = {
+    "investing.com", "wsj.com", "bloomberg.com", "ft.com", "barrons.com",
+    "marketwatch.com", "seekingalpha.com", "tipranks.com", "thestreet.com",
+    "fool.com", "zacks.com", "stocktwits.com", "reddit.com", "quora.com",
+    "medium.com",
+}
+PREFERRED_NEWS_DOMAINS = {
+    "sec.gov": 100, "prnewswire.com": 90, "businesswire.com": 90,
+    "globenewswire.com": 90, "reuters.com": 80, "cnbc.com": 70,
+    "techcrunch.com": 65, "apnews.com": 65, "nasdaq.com": 60,
+}
 
 
 def _clean(text: Any) -> str:
@@ -58,18 +72,82 @@ def _classify(headline: str, summary: str = "") -> str:
     t = f"{headline} {summary}".lower()
     rules = [
         ("earnings", ("earnings", "quarter", "revenue", "profit", "eps", "results")),
-        ("guidance", ("guidance", "forecast", "outlook", "expects", "raises forecast", "cuts forecast")),
-        ("regulatory", ("sec filing", "regulator", "antitrust", "lawsuit", "export control", "sanction", "tariff")),
+        ("guidance", ("guidance", "forecast", "outlook", "expects", "raises forecast", "cuts forecast", "profit warning")),
+        ("clinical", ("fda", "clinical", "trial", "phase 1", "phase 2", "phase 3", "drug", "endpoint", "approval")),
+        ("regulatory", ("sec filing", "regulator", "antitrust", "lawsuit", "export control", "sanction", "tariff", "investigation", "fine", "subpoena")),
         ("analyst", ("upgrade", "downgrade", "price target", "rating", "initiates", "outperform", "underperform")),
         ("supply-demand", ("capacity", "production", "supply", "shortage", "demand", "pricing pressure", "competitor")),
-        ("product", ("launch", "unveil", "release", "model", "product", "chip", "platform")),
+        ("product", ("launch", "unveil", "release", "model", "product", "chip", "platform", "contract", "order", "partnership")),
         ("macro", ("federal reserve", "fed ", "inflation", "cpi", "jobs", "payroll", "unemployment", "interest rate", "treasury")),
-        ("corporate", ("acquisition", "merger", "takeover", "deal", "buyback", "dividend", "ceo", "offering", "debt")),
+        ("corporate", ("acquisition", "merger", "takeover", "deal", "buyback", "dividend", "ceo", "offering", "debt", "stake", "bankruptcy", "layoff", "restructur")),
     ]
     for label, words in rules:
         if any(w in t for w in words):
             return label
     return "unclear"
+
+
+def _company_query_name(company: str, symbol: str) -> str:
+    x = _clean(company or symbol)
+    x = re.sub(r"\b(holdings?|incorporated|inc|corporation|corp|company|co|plc|ltd|limited|sa|se|ag|nv|group|class a|class b)\b\.?", " ", x, flags=re.I)
+    x = re.sub(r"[^A-Za-z0-9&' -]+", " ", x)
+    return re.sub(r"\s+", " ", x).strip(" ,-. ") or symbol
+
+
+def _domain(url: str, fallback: str = "") -> str:
+    try:
+        host = (urlparse(str(url or "")).hostname or "").lower().removeprefix("www.")
+        return host or str(fallback or "").lower().removeprefix("www.")
+    except Exception:
+        return str(fallback or "").lower().removeprefix("www.")
+
+
+def _domain_matches(domain: str, target: str) -> bool:
+    return domain == target or domain.endswith("." + target)
+
+
+def source_allowed(url: str, supplied_domain: str = "") -> bool:
+    if not re.match(r"^https?://", str(url or ""), flags=re.I):
+        return False
+    domain = _domain(url, supplied_domain)
+    return bool(domain) and not any(_domain_matches(domain, b) for b in BLOCKED_NEWS_DOMAINS)
+
+
+def _has_emoji(text: str) -> bool:
+    return any(unicodedata.category(ch) == "So" for ch in str(text or ""))
+
+
+def company_headline_relevant(headline: str, company: str, symbol: str) -> bool:
+    h = _clean(headline)
+    low = h.lower()
+    if not h or _has_emoji(h):
+        return False
+    # Reject community/commentary snippets. This specifically prevents posts such
+    # as "I live near Absci's headquarters..." from being treated as catalysts.
+    if re.search(r"\b(i|i'm|i’ve|i've|my|me|we|we're|we’ve|we've|our)\b", low):
+        return False
+    if any(x in low for x in ("reddit", "stocktwits", "forum post", "message board", "should you buy", "is it time to buy", "my portfolio")):
+        return False
+    qname = _company_query_name(company, symbol)
+    if qname and qname.lower() in low:
+        return True
+    if len(symbol) >= 3 and re.search(rf"(?<![A-Z0-9]){re.escape(symbol.upper())}(?![A-Z0-9])", h.upper()):
+        return True
+    ignore = {"the", "and", "class", "group", "holdings", "technology", "technologies", "systems", "international"}
+    tokens = [t.lower() for t in re.findall(r"[A-Za-z0-9]+", qname) if len(t) >= 4 and t.lower() not in ignore]
+    return bool(tokens and any(t in low for t in tokens[:3]))
+
+
+def source_score(url: str, supplied_domain: str = "") -> int:
+    domain = _domain(url, supplied_domain)
+    score = 30
+    for target, value in PREFERRED_NEWS_DOMAINS.items():
+        if _domain_matches(domain, target):
+            score = max(score, value)
+    low = str(url or "").lower()
+    if any(x in low for x in ("/investor", "/investors", "/newsroom", "/press-release", "/press_releases")):
+        score = max(score, 85)
+    return score
 
 
 class FreeNewsCollector:
@@ -105,31 +183,32 @@ class FreeNewsCollector:
         return mapping.get(symbol.upper(), {})
 
     async def gdelt_company(self, symbol: str, company: str, *, limit: int = 12) -> list[dict]:
-        query_name = _clean(company or symbol)
-        query_name = re.sub(r"\b(holdings?|incorporated|inc|corporation|corp|company|co|plc|ltd)\b\.?", " ", query_name, flags=re.I)
-        query_name = re.sub(r"[^A-Za-z0-9&' -]+", " ", query_name)
-        query_name = re.sub(r"\s+", " ", query_name).strip(" ,-.")
-        # Company names are much less noisy than short ticker strings such as MCD or CAT.
+        query_name = _company_query_name(company, symbol)
         query = f'"{query_name}" sourcelang:english' if query_name and query_name.upper() != symbol.upper() else f'"{symbol}" sourcelang:english'
 
         async def fetch(timespan: str, maxrecords: int) -> list[dict]:
             r = await self._client_get(
                 GDELT_URL,
-                params={"query": query, "mode": "ArtList", "maxrecords": min(maxrecords, 30), "format": "json", "sort": "DateDesc", "timespan": timespan},
+                params={"query": query, "mode": "ArtList", "maxrecords": min(max(maxrecords * 3, 20), 50), "format": "json", "sort": "DateDesc", "timespan": timespan},
             )
             payload = r.json() if r.content else {}
-            out: list[dict] = []
-            for a in (payload.get("articles") or [])[:maxrecords]:
+            candidates: list[tuple[int, str, dict]] = []
+            for a in payload.get("articles") or []:
                 headline = _clean(a.get("title"))
-                url = str(a.get("url") or "")
-                if not headline:
+                url = str(a.get("url") or "").strip()
+                supplied_domain = _clean(a.get("domain") or "")
+                if not company_headline_relevant(headline, company, symbol):
                     continue
-                out.append({
+                if not source_allowed(url, supplied_domain):
+                    continue
+                kind = _classify(headline)
+                published = _iso_date(a.get("seendate"))
+                item = {
                     "event_key": _event_key("GDELT", url, headline),
-                    "published_at": _iso_date(a.get("seendate")),
-                    "type": _classify(headline),
+                    "published_at": published,
+                    "type": kind,
                     "headline": headline,
-                    "source": _clean(a.get("domain") or "GDELT-indexed source"),
+                    "source": _domain(url, supplied_domain) or "Public source",
                     "source_url": url,
                     "impact": "neutral",
                     "specificity": "company",
@@ -138,8 +217,11 @@ class FreeNewsCollector:
                     "move_connection": "",
                     "symbol": symbol,
                     "company": company,
-                })
-            return out
+                    "source_quality": source_score(url, supplied_domain),
+                }
+                candidates.append((item["source_quality"], str(published or ""), item))
+            candidates.sort(key=lambda x: (x[0], x[1]), reverse=True)
+            return [x[2] for x in candidates[:maxrecords]]
 
         out = await fetch("7d", limit)
         if not out:
