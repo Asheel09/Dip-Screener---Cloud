@@ -1,71 +1,35 @@
 [
   {
-    "id": "ai-assistant",
-    "name": "AI Research",
-    "icon": "\u2726",
-    "section": "AI",
-    "description": "Ask questions across the current dashboard and stock research context.",
-    "enabled": true,
-    "order": 80
-  },
-  {
-    "id": "customize",
-    "name": "Customize",
-    "icon": "\u25c7",
-    "section": "AI",
-    "description": "Describe dashboard changes, preview them, then apply safe live changes.",
-    "enabled": true,
-    "order": 90
-  },
-  {
-    "id": "live-dips",
-    "name": "Live Dips",
-    "icon": "\u2198",
-    "section": "MARKET",
-    "description": "Abnormal live drawdowns ranked by severity and recovery evidence.",
-    "enabled": true,
-    "order": 10
-  },
-  {
-    "id": "broad-market",
-    "name": "Broad Market",
-    "icon": "\u25ce",
-    "section": "MARKET",
-    "description": "Indexes, sectors, rates, credit, commodities and breadth in one tab.",
-    "enabled": true,
-    "order": 20
-  },
-  {
     "id": "movers",
-    "name": "Mover Radar",
-    "icon": "\u2195",
+    "name": "Movers",
+    "icon": "↕",
     "section": "MARKET",
-    "description": "Global IBKR Top % Losers discovery scan with fresh catalyst checks.",
+    "description": "US-listed gainers and losers with verified catalyst checks.",
     "enabled": true,
     "order": 5
   },
   {
-    "id": "news",
-    "name": "News & Catalysts",
-    "icon": "\u25eb",
+    "id": "broad-market",
+    "name": "Broad Market",
+    "icon": "◎",
     "section": "MARKET",
-    "description": "Company-specific, sector, macro and second-order catalysts.",
+    "description": "A compact read on major indexes and clearly labelled sector ETFs.",
+    "enabled": true,
+    "order": 20
+  },
+  {
+    "id": "news",
+    "name": "Stock News",
+    "icon": "◫",
+    "section": "MARKET",
+    "description": "Company-specific news for current movers using free, relevant source links.",
     "enabled": true,
     "order": 40
   },
   {
-    "id": "comparable-drops",
-    "name": "Comparable Drops",
-    "icon": "\u224b",
-    "section": "OPPORTUNITIES",
-    "description": "Comparable-dislocation recovery research.",
-    "enabled": true,
-    "order": 50
-  },
-  {
     "id": "watchlist",
     "name": "Watchlist",
-    "icon": "\u2606",
+    "icon": "☆",
     "section": "RESEARCH",
     "description": "Pinned names and research follow-ups.",
     "enabled": true,
@@ -74,7 +38,7 @@
   {
     "id": "backtests",
     "name": "Backtests",
-    "icon": "\u2301",
+    "icon": "⌁",
     "section": "RESEARCH",
     "description": "Walk-forward model validation and reliability diagnostics.",
     "enabled": true,
