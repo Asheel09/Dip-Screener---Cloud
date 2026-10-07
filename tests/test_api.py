@@ -16,7 +16,7 @@ class DashboardTests(unittest.TestCase):
     def test_health(self):
         d = self.client.get('/api/health').json()
         self.assertTrue(d['ok'])
-        self.assertEqual(d['version'], '3.4.0')
+        self.assertEqual(d['version'], '3.4.1')
         self.assertIn('market_status', d)
 
     def test_live_has_rows_and_settings(self):
