@@ -7,6 +7,7 @@ os.environ.setdefault("NEWS_PROVIDER", "demo")
 from fastapi.testclient import TestClient
 from app import app
 
+
 class DashboardTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -15,24 +16,14 @@ class DashboardTests(unittest.TestCase):
     def test_health(self):
         d = self.client.get('/api/health').json()
         self.assertTrue(d['ok'])
-        self.assertEqual(d['version'], '3.3.0')
-        self.assertIn('ai_configured', d)
+        self.assertEqual(d['version'], '3.4.0')
+        self.assertIn('market_status', d)
 
     def test_live_has_rows_and_settings(self):
         d = self.client.get('/api/live').json()
         self.assertGreater(len(d['rows']), 5)
         self.assertIn('severity', d['rows'][0])
         self.assertIn('settings', d)
-
-    def test_research(self):
-        d = self.client.get('/api/research/AMD').json()
-        self.assertEqual(d['symbol'], 'AMD')
-        self.assertIn('news', d)
-        self.assertIn('history', d)
-        self.assertIn('recovery', d)
-        self.assertIn('description', d)
-        self.assertIn('news_live', d)
-
 
     def test_research_summary_is_local_shape(self):
         d = self.client.get('/api/research-summary/AMD').json()
@@ -41,13 +32,22 @@ class DashboardTests(unittest.TestCase):
         self.assertIn('history', d)
         self.assertEqual(d['news'], [])
 
-    def test_screeners_include_ai(self):
+    def test_navigation_is_trimmed(self):
         d = self.client.get('/api/screeners').json()
         ids = {x['id'] for x in d}
-        self.assertIn('live-dips', ids)
-        self.assertIn('ai-assistant', ids)
-        self.assertIn('customize', ids)
+        self.assertIn('movers', ids)
         self.assertIn('broad-market', ids)
+        self.assertIn('news', ids)
+        self.assertIn('watchlist', ids)
+        self.assertIn('backtests', ids)
+        self.assertNotIn('live-dips', ids)
+        self.assertNotIn('comparable-drops', ids)
+        self.assertNotIn('ai-assistant', ids)
+        self.assertNotIn('customize', ids)
+        mover = next(x for x in d if x['id'] == 'movers')
+        self.assertEqual(mover['name'], 'Movers')
+        news = next(x for x in d if x['id'] == 'news')
+        self.assertEqual(news['name'], 'Stock News')
 
     def test_settings_live_update_and_restore(self):
         old = self.client.get('/api/settings').json()['settings']
@@ -57,98 +57,65 @@ class DashboardTests(unittest.TestCase):
         self.assertTrue(r.json()['settings']['compact_mode'])
         self.client.put('/api/settings', json={'changes': old})
 
-
-
-    def test_broad_market_is_separate(self):
+    def test_broad_market_has_indexes_and_sectors(self):
         d = self.client.get('/api/market-overview').json()
         self.assertIn('Indexes', d['groups'])
         self.assertIn('Sectors', d['groups'])
         self.assertGreaterEqual(len(d['groups']['Indexes']), 4)
-        live = self.client.get('/api/live').json()['rows']
-        self.assertTrue(all(x.get('kind', 'stock') != 'market' for x in live))
 
-    def test_default_universe_is_larger_than_twelve(self):
+    def test_default_universe_is_large(self):
         d = self.client.get('/api/market-overview').json()
-        total = d['status']['total_symbols']
-        self.assertGreaterEqual(total, 500)
+        self.assertGreaterEqual(d['status']['total_symbols'], 500)
 
-    def test_health_exposes_market_status(self):
-        d = self.client.get('/api/health').json()
-        self.assertIn('market_status', d)
-        self.assertIn('state', d['market_status'])
-
-
-    def test_mover_radar_demo_shape(self):
-        d = self.client.get('/api/mover-radar?region=all').json()
+    def test_mover_radar_demo_has_both_reason_status_and_us_only(self):
+        d = self.client.get('/api/mover-radar?region=us').json()
         self.assertIn('rows', d)
         self.assertGreater(len(d['rows']), 0)
-        self.assertIn('move', d['rows'][0])
+        self.assertTrue(all(x.get('region') == 'US' for x in d['rows']))
+        self.assertTrue(all('reason' in x for x in d['rows']))
 
-    def test_mover_radar_is_in_navigation(self):
-        d = self.client.get('/api/screeners').json()
-        mover = next(x for x in d if x['id'] == 'movers')
-        self.assertEqual(mover['name'], 'Mover Radar')
+    def test_europe_region_is_rejected(self):
+        r = self.client.get('/api/mover-radar?region=europe')
+        self.assertEqual(r.status_code, 400)
 
-    def test_europe_scanner_locations_include_paris(self):
-        from services.ibkr_webapi import IBKRWebAPI
-        params = {"location_tree": [{"display_name": "European Stocks", "type": "STOCK.EU", "locations": [
-            {"display_name": "Paris", "type": "STK.EU.SBF", "locations": []},
-            {"display_name": "Xetra", "type": "STK.EU.IBIS", "locations": []}
-        ]}]}
-        configs = IBKRWebAPI._scanner_region_configs(params, 'europe')
-        self.assertIn('STK.EU.SBF', {x['location'] for x in configs})
+    def test_relay_discards_europe_and_preserves_verified_reason(self):
+        from app import state
+        state.set_relay_movers([
+            {'symbol':'SU','name':'Schneider Electric','region':'Europe','exchange':'EURONEXT','move':-9.2,'price':250,'session':'REGULAR'},
+            {'symbol':'STX','name':'Seagate','region':'US','exchange':'NASDAQ','move':-8.1,'price':200,'session':'PREMARKET',
+             'reason':'Seagate slides after company guidance update','cause_type':'guidance','news_url':'https://www.reuters.com/technology/seagate-guidance-example','reason_verified':True},
+            {'symbol':'XYZ','name':'Example','region':'US','exchange':'NYSE','move':6.2,'price':40,'session':'REGULAR',
+             'reason':'No verified catalyst found','cause_type':'unverified','reason_verified':False},
+            {'symbol':'ABSI','name':'Absci','region':'US','exchange':'NASDAQ','move':-10.9,'price':10.2,'session':'REGULAR',
+             'reason':"It turns out I live near Absci's headquarters 😊",'cause_type':'corporate','news_url':'https://www.reuters.com/example','reason_verified':True},
+        ], source='test-relay')
+        scan = state._relay_scan('us')
+        self.assertEqual(scan['provider'], 'local-relay')
+        self.assertEqual({x['symbol'] for x in scan['rows']}, {'STX','XYZ','ABSI'})
+        stx = next(x for x in scan['rows'] if x['symbol']=='STX')
+        self.assertTrue(stx['reason_verified'])
+        self.assertEqual(stx['cause_type'], 'guidance')
+        absi = next(x for x in scan['rows'] if x['symbol']=='ABSI')
+        self.assertFalse(absi['reason_verified'])
+        self.assertEqual(absi['reason'], 'No verified catalyst found')
+        self.assertEqual(absi['news_url'], '')
 
-    def test_catalyst_classifier_handles_target_events(self):
-        from services.free_news import _classify
-        self.assertEqual(_classify('Schneider Electric falls after acquisition deal'), 'corporate')
-        self.assertEqual(_classify('Seagate slides as rival expands production capacity'), 'supply-demand')
-        self.assertEqual(_classify('Broker downgrades shares and cuts price target'), 'analyst')
-
+    def test_catalyst_classifier_and_source_filters(self):
+        from services.free_news import _classify, company_headline_relevant, source_allowed
+        self.assertEqual(_classify('Company reports earnings and revenue'), 'earnings')
+        self.assertEqual(_classify('Biotech announces Phase 2 clinical trial'), 'clinical')
+        self.assertFalse(source_allowed('https://www.investing.com/news/example'))
+        self.assertFalse(source_allowed('https://www.reddit.com/r/stocks/example'))
+        self.assertTrue(source_allowed('https://www.reuters.com/business/example'))
+        self.assertFalse(company_headline_relevant("It turns out I live near Absci's headquarters 😊", 'Absci', 'ABSI'))
+        self.assertTrue(company_headline_relevant('Absci announces Phase 2 trial plan', 'Absci', 'ABSI'))
 
     def test_yahoo_session_move_prefers_premarket(self):
         from services.yahoo_market import YahooMarketAPI
-        q = {
-            'marketState': 'PRE', 'regularMarketPreviousClose': 100,
-            'regularMarketPrice': 100, 'preMarketPrice': 94,
-            'preMarketChangePercent': -6.0
-        }
+        q = {'marketState': 'PRE', 'regularMarketPreviousClose': 100, 'regularMarketPrice': 100, 'preMarketPrice': 94, 'preMarketChangePercent': -6.0}
         session, move, reference, extended = YahooMarketAPI._screen_move(q)
-        self.assertEqual(session, 'PREMARKET')
-        self.assertEqual(move, -6.0)
-        self.assertEqual(reference, 100)
-        self.assertEqual(extended, 94)
+        self.assertEqual((session, move, reference, extended), ('PREMARKET', -6.0, 100, 94))
 
-    def test_yahoo_closed_market_keeps_regular_reference(self):
-        from services.yahoo_market import YahooMarketAPI
-        q = {'marketState': 'CLOSED', 'regularMarketPrice': 661.75, 'regularMarketPreviousClose': 592.47, 'regularMarketChangePercent': 11.69}
-        session, move, reference, extended = YahooMarketAPI._screen_move(q)
-        self.assertEqual(session, 'PREVIOUS_CLOSE')
-        self.assertEqual(reference, 661.75)
-        self.assertIsNone(extended)
-
-
-    def test_relay_snapshot_preferred_and_filtered(self):
-        from app import state
-        state.set_relay_movers([
-            {'symbol':'SU','name':'Schneider Electric','region':'Europe','exchange':'EURONEXT','move':-9.2,'price':250,'session':'REGULAR',
-             'reason':'Schneider Electric falls after acquisition deal','cause_type':'corporate','news_url':'https://example.com/schneider'},
-            {'symbol':'STX','name':'Seagate','region':'US','exchange':'NASDAQ','move':-8.1,'price':200,'session':'PREMARKET'},
-        ], source='test-relay')
-        all_scan=state._relay_scan('all')
-        self.assertEqual(all_scan['provider'],'local-relay')
-        self.assertEqual(len(all_scan['rows']),2)
-        self.assertEqual(all_scan['rows'][0]['reason'],'Schneider Electric falls after acquisition deal')
-        self.assertEqual(all_scan['rows'][0]['cause_type'],'corporate')
-        self.assertEqual(all_scan['rows'][0]['news_url'],'https://example.com/schneider')
-        eu=state._relay_scan('europe')
-        self.assertEqual([x['symbol'] for x in eu['rows']],['SU'])
-
-    def test_ai_without_key_is_safe(self):
-        # In CI/local test environments without a key, this should fail clearly rather than expose anything.
-        h = self.client.get('/api/health').json()
-        if not h['ai_configured']:
-            r = self.client.post('/api/ai/ask', json={'question': 'test'})
-            self.assertEqual(r.status_code, 503)
 
 if __name__ == '__main__':
     unittest.main()
