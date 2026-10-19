@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Meridian local mover relay — v3.6 context + hourly refresh.
+"""Meridian local mover relay — v3.6.2 context + hourly refresh.
 
 Runs on one ordinary Mac/Windows laptop, scans liquid US-listed stocks through
 TradingView, attaches a *verified* recent catalyst where a relevant free source
@@ -90,6 +90,8 @@ PREFERRED_DOMAINS = {
     "apnews.com": 65,
     "nasdaq.com": 60,
 }
+
+CONTEXT_COLS = ["sector", "industry", "Perf.W", "Perf.1M", "relative_volume_10d_calc"]
 
 COLS = [
     "name", "description", "close", "change", "volume",
@@ -308,6 +310,59 @@ def scan(*, sort_order: str, limit: int = MOVERS_PER_SIDE):
 
     out.sort(key=lambda x: x["move"], reverse=(sort_order == "desc"))
     return out[:limit]
+
+
+def enrich_market_context(rows: list[dict]) -> int:
+    """Refetch classification/performance for the selected movers in one small batch.
+
+    This is intentionally separate from the ranked scan. It makes Sector, Industry,
+    1W, 1M and Rel Vol robust even when the bulk ranked response omits trailing
+    fields for some symbols. Returns the number of rows receiving any context.
+    """
+    tickers = [str(r.get("tv_symbol") or "") for r in rows if r.get("tv_symbol")]
+    if not tickers:
+        return 0
+    body = post_json(
+        TV_BASE.format(market="america"),
+        {
+            "markets": ["america"],
+            "symbols": {"query": {"types": []}, "tickers": tickers},
+            "options": {"lang": "en"},
+            "columns": CONTEXT_COLS,
+            "range": [0, len(tickers)],
+            "ignore_unknown_fields": False,
+        },
+    )
+    idx = {c: i for i, c in enumerate(CONTEXT_COLS)}
+    by_symbol = {str(r.get("tv_symbol") or "").upper(): r for r in rows}
+    updated = 0
+    for raw in body.get("data") or []:
+        ref = str(raw.get("s") or "").upper()
+        vals = raw.get("d") or []
+        row = by_symbol.get(ref)
+        if not row:
+            continue
+        def cv(k):
+            i = idx[k]
+            return vals[i] if i < len(vals) else None
+        sector = str(cv("sector") or "").strip()
+        industry = str(cv("industry") or "").strip()
+        week = num(cv("Perf.W"))
+        month = num(cv("Perf.1M"))
+        relvol = num(cv("relative_volume_10d_calc"))
+        if sector:
+            row["sector"] = sector
+        if industry:
+            row["industry"] = industry
+        if week is not None:
+            row["week_move"] = week
+        if month is not None:
+            row["month_move"] = month
+        if relvol is not None:
+            row["relative_volume"] = relvol
+        if sector or industry or week is not None or month is not None or relvol is not None:
+            updated += 1
+    return updated
 
 
 def infer_themes(row: dict) -> list[str]:
@@ -781,6 +836,11 @@ def collect():
             continue
         seen.add(k)
         merged.append(x)
+    try:
+        context_rows = enrich_market_context(merged)
+    except Exception as e:
+        context_rows = 0
+        errors.append(f"Mover context: {e}")
     attach_sector_context(merged, benchmarks)
     attach_scan_deltas(merged, load_scan_state())
     enrich_reasons(merged)
@@ -816,7 +876,7 @@ def main():
         print("Need --url and --token (or MERIDIAN_URL / MERIDIAN_RELAY_TOKEN).", file=sys.stderr)
         return 2
 
-    print("Meridian relay v3.6 started. Ctrl+C stops it.", flush=True)
+    print("Meridian relay v3.6.2 started. Ctrl+C stops it.", flush=True)
     print("US movers: TradingView · 1D/1W/1M · relative volume · sector-relative context · Google News + GDELT", flush=True)
     print(f"Refresh interval: {max(300, a.interval) // 60} minutes", flush=True)
 
@@ -828,7 +888,7 @@ def main():
             verified = sum(1 for r in rows if r.get("reason_verified"))
             news_count = sum(1 for r in rows if r.get("latest_news_url") or r.get("news_url"))
             print(datetime.now().strftime("%H:%M:%S"),
-                  f"collected {len(rows)} movers · {verified} verified catalysts · {news_count} with news",
+                  f"collected {len(rows)} movers · {sum(1 for r in rows if r.get('sector') or r.get('industry') or r.get('week_move') is not None or r.get('month_move') is not None)} with context · {verified} verified catalysts · {news_count} with news",
                   (" | " + "; ".join(errors) if errors else ""), flush=True)
 
             # Don't erase the existing dashboard if TradingView fails completely.
