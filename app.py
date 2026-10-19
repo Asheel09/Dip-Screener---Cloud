@@ -21,7 +21,7 @@ from services.dip_engine import classify
 
 ROOT = Path(__file__).resolve().parent
 load_dotenv(ROOT / ".env")
-app = FastAPI(title="Meridian Market Dashboard", version="3.6.0")
+app = FastAPI(title="Meridian Market Dashboard", version="3.6.1")
 state = MarketState()
 news = NewsService()
 research = ResearchService(news, state)
@@ -177,7 +177,7 @@ def market_overview(rows: list[dict] | None = None) -> dict:
 
 @app.get("/api/health")
 def health() -> dict:
-    return {"ok": True, "mode": state.provider, "version": "3.6.0", "stream_version": state.version, "updated_at": state.updated_at, "market_status": state.status, "ai_configured": ai.configured, "news_provider": news.provider, "news_live": news.live, "news_status": news.status}
+    return {"ok": True, "mode": state.provider, "version": "3.6.1", "stream_version": state.version, "updated_at": state.updated_at, "market_status": state.status, "ai_configured": ai.configured, "news_provider": news.provider, "news_live": news.live, "news_status": news.status}
 
 @app.get("/api/screeners")
 def screeners(include_disabled: bool = False) -> list[dict]:
@@ -355,11 +355,11 @@ app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
 
 @app.get("/")
 def index():
-    return FileResponse(ROOT / "static" / "index.html")
+    return FileResponse(ROOT / "static" / "index.html", headers={"Cache-Control": "no-cache"})
 
 @app.get("/{path:path}")
 def spa(path: str):
     candidate = ROOT / "static" / path
     if candidate.exists() and candidate.is_file():
         return FileResponse(candidate)
-    return FileResponse(ROOT / "static" / "index.html")
+    return FileResponse(ROOT / "static" / "index.html", headers={"Cache-Control": "no-cache"})
