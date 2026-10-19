@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Meridian local mover relay — v3.4 compatible.
+"""Meridian local mover relay — v3.6 context + hourly refresh.
 
 Runs on one ordinary Mac/Windows laptop, scans liquid US-listed stocks through
 TradingView, attaches a *verified* recent catalyst where a relevant free source
@@ -25,6 +25,8 @@ import time
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
+from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
@@ -33,10 +35,13 @@ from xml.etree import ElementTree as ET
 TV_BASE = "https://scanner.tradingview.com/{market}/scan"
 GDELT_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
 GOOGLE_NEWS_RSS = "https://news.google.com/rss/search"
-NEWS_CACHE_SECONDS = 1800
+NEWS_CACHE_SECONDS = 3600
 MOVERS_PER_SIDE = 25
 MIN_ABS_MOVE = 1.5
 MAX_NEWS_WORKERS = 4
+DEFAULT_INTERVAL_SECONDS = 3600
+MAX_SCAN_DELTA_AGE_SECONDS = 6 * 3600
+RELAY_STATE_FILE = Path(__file__).with_name("meridian_relay_state.json")
 _news_cache: dict[str, tuple[float, dict]] = {}
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/129 Safari/537.36"
 
@@ -45,6 +50,26 @@ UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/
 US_EXCHANGES = {
     "NASDAQ", "NYSE", "AMEX", "NYSEARCA", "NYSEAMERICAN",
 }
+
+# Broad sector ETF proxies used for quick company-vs-sector context. TradingView
+# sector names are broader than GICS in places, so this intentionally maps to
+# the closest liquid Select Sector / broad US ETF rather than claiming a perfect
+# taxonomy match.
+SECTOR_BENCHMARK_RULES = [
+    (("electronic technology", "technology services"), "AMEX:XLK", "XLK"),
+    (("communications",), "AMEX:XLC", "XLC"),
+    (("retail trade", "consumer durables", "consumer services"), "AMEX:XLY", "XLY"),
+    (("consumer non-durables",), "AMEX:XLP", "XLP"),
+    (("finance",), "AMEX:XLF", "XLF"),
+    (("health technology", "health services"), "AMEX:XLV", "XLV"),
+    (("producer manufacturing", "industrial services", "transportation", "distribution services", "commercial services"), "AMEX:XLI", "XLI"),
+    (("energy minerals",), "AMEX:XLE", "XLE"),
+    (("process industries", "non-energy minerals"), "AMEX:XLB", "XLB"),
+    (("utilities",), "AMEX:XLU", "XLU"),
+    (("real estate",), "AMEX:XLRE", "XLRE"),
+]
+SECTOR_BENCHMARK_TICKERS = sorted({tv for _, tv, _ in SECTOR_BENCHMARK_RULES})
+BENCHMARK_COLS = ["name", "change", "premarket_change", "postmarket_change"]
 
 BLOCKED_DOMAINS = {
     # Explicitly unsuitable for the user's dashboard or commonly paywalled.
@@ -72,6 +97,49 @@ COLS = [
     "premarket_close", "premarket_change", "premarket_volume",
     "postmarket_close", "postmarket_change", "postmarket_volume",
     "type", "typespecs", "market",
+    "sector", "industry", "Perf.W", "Perf.1M",
+]
+
+# These are thematic exposures, not official sector classifications.  They are
+# deliberately short and conservative: TradingView supplies sector + industry,
+# while the tags below add the cross-industry themes that matter for quick
+# market-context reading (AI, cloud, biotech, energy, etc.).
+THEME_OVERRIDES = {
+    "BABA": ["E-commerce", "Cloud", "AI"],
+    "AMZN": ["E-commerce", "Cloud", "AI"],
+    "MSFT": ["Cloud", "AI", "Enterprise software"],
+    "GOOGL": ["Digital ads", "Cloud", "AI"],
+    "GOOG": ["Digital ads", "Cloud", "AI"],
+    "META": ["Digital ads", "AI", "Social platforms"],
+    "NVDA": ["Semiconductors", "AI accelerators", "Data center"],
+    "AMD": ["Semiconductors", "AI accelerators", "Data center"],
+    "AVGO": ["Semiconductors", "Networking", "AI infrastructure"],
+    "TSM": ["Semiconductor foundry", "AI infrastructure"],
+    "MU": ["Memory", "HBM", "AI infrastructure"],
+    "ASML": ["Semiconductor equipment", "Lithography"],
+    "AMAT": ["Semiconductor equipment"],
+    "ORCL": ["Enterprise software", "Cloud", "AI infrastructure"],
+    "CRWV": ["AI cloud", "GPU infrastructure"],
+    "TMUS": ["Wireless telecom", "5G", "Spectrum"],
+    "UBER": ["Mobility", "Delivery", "Autonomous vehicles"],
+    "SHOP": ["E-commerce", "Payments", "Merchant software"],
+}
+
+THEME_RULES = [
+    ("AI", ("artificial intelligence", " ai ", "generative ai", "machine learning")),
+    ("Cloud", ("cloud", "data center", "datacenter")),
+    ("Cybersecurity", ("cybersecurity", "security software", "network security")),
+    ("Semiconductors", ("semiconductor", "chipmaker", "chip maker", "integrated circuits")),
+    ("Biotech", ("biotechnology", "biotech", "clinical", "therapeutics")),
+    ("Pharma", ("pharmaceutical", "drug manufacturer")),
+    ("E-commerce", ("internet retail", "e-commerce", "ecommerce", "online retail")),
+    ("Payments", ("payments", "payment processing", "fintech")),
+    ("Oil & gas", ("oil & gas", "oil and gas", "petroleum", "exploration & production")),
+    ("Renewables", ("solar", "renewable", "clean energy")),
+    ("Airlines", ("airlines", "air transportation")),
+    ("Telecom", ("telecom", "wireless", "communication services")),
+    ("EV", ("electric vehicle", "electric vehicles", "automotive")),
+    ("Mining", ("mining", "copper", "gold", "metals")),
 ]
 
 
@@ -232,10 +300,171 @@ def scan(*, sort_order: str, limit: int = MOVERS_PER_SIDE):
             "relative_volume": num(v("relative_volume_10d_calc")),
             "tv_symbol": ref,
             "source_market": str(v("market") or ""),
+            "sector": str(v("sector") or "").strip(),
+            "industry": str(v("industry") or "").strip(),
+            "week_move": num(v("Perf.W")),
+            "month_move": num(v("Perf.1M")),
         })
 
     out.sort(key=lambda x: x["move"], reverse=(sort_order == "desc"))
     return out[:limit]
+
+
+def infer_themes(row: dict) -> list[str]:
+    symbol = str(row.get("symbol") or "").upper()
+    themes = list(THEME_OVERRIDES.get(symbol, ()))
+    hay = " " + " ".join(str(row.get(k) or "") for k in (
+        "name", "sector", "industry", "reason", "latest_news_headline"
+    )).lower() + " "
+    for label, needles in THEME_RULES:
+        if any(n in hay for n in needles) and label not in themes:
+            themes.append(label)
+    # Keep the cell useful rather than turning it into a taxonomy dump.
+    return themes[:4]
+
+
+def attach_themes(rows):
+    for row in rows:
+        row["themes"] = infer_themes(row)
+    return rows
+
+
+def sector_benchmark_for(sector: str) -> tuple[str, str] | None:
+    low = str(sector or "").strip().lower()
+    for needles, tv_symbol, label in SECTOR_BENCHMARK_RULES:
+        if any(n == low or n in low for n in needles):
+            return tv_symbol, label
+    return None
+
+
+def fetch_sector_benchmarks() -> dict[str, float]:
+    """Fetch all sector ETF moves in one additional TradingView request."""
+    body = post_json(
+        TV_BASE.format(market="america"),
+        {
+            "markets": ["america"],
+            "symbols": {"query": {"types": []}, "tickers": SECTOR_BENCHMARK_TICKERS},
+            "options": {"lang": "en"},
+            "columns": BENCHMARK_COLS,
+            "range": [0, len(SECTOR_BENCHMARK_TICKERS)],
+            "ignore_unknown_fields": False,
+        },
+    )
+    idx = {c: i for i, c in enumerate(BENCHMARK_COLS)}
+    session = us_session()
+    out: dict[str, float] = {}
+    for raw in body.get("data") or []:
+        ref = str(raw.get("s") or "")
+        vals = raw.get("d") or []
+        if not ref or not vals:
+            continue
+        def v(k):
+            i = idx[k]
+            return vals[i] if i < len(vals) else None
+        if session == "PREMARKET":
+            move = num(v("premarket_change"))
+        elif session == "AFTERHOURS":
+            move = num(v("postmarket_change"))
+        else:
+            move = num(v("change"))
+        if move is not None:
+            out[ref.upper()] = move
+    return out
+
+
+def attach_sector_context(rows: list[dict], benchmarks: dict[str, float]) -> list[dict]:
+    for row in rows:
+        match = sector_benchmark_for(str(row.get("sector") or ""))
+        if not match:
+            continue
+        tv_symbol, label = match
+        bench_move = benchmarks.get(tv_symbol.upper())
+        if bench_move is None:
+            continue
+        row["sector_benchmark"] = label
+        row["sector_move"] = round(float(bench_move), 3)
+        try:
+            row["sector_relative_move"] = round(float(row.get("move")) - float(bench_move), 3)
+        except Exception:
+            pass
+    return rows
+
+
+def published_epoch(value) -> float | None:
+    s = str(value or "").strip()
+    if not s:
+        return None
+    for candidate, fmt in ((s[:14], "%Y%m%d%H%M%S"), (s[:16], "%Y%m%dT%H%M%SZ")):
+        try:
+            return datetime.strptime(candidate, fmt).replace(tzinfo=timezone.utc).timestamp()
+        except Exception:
+            pass
+    try:
+        dt = parsedate_to_datetime(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    except Exception:
+        pass
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    except Exception:
+        return None
+
+
+def catalyst_quality(score) -> str:
+    try:
+        score = int(score)
+    except Exception:
+        return ""
+    if score >= 80:
+        return "High"
+    if score >= 60:
+        return "Medium"
+    return "Standard"
+
+
+def load_scan_state() -> dict:
+    try:
+        data = json.loads(RELAY_STATE_FILE.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return {}
+        if time.time() - float(data.get("collected_at") or 0) > MAX_SCAN_DELTA_AGE_SECONDS:
+            return {}
+        return data
+    except Exception:
+        return {}
+
+
+def attach_scan_deltas(rows: list[dict], previous: dict) -> list[dict]:
+    old = previous.get("moves") or {}
+    previous_at = previous.get("collected_at")
+    for row in rows:
+        key = str(row.get("tv_symbol") or row.get("symbol") or "")
+        prev = old.get(key)
+        try:
+            if prev is not None:
+                row["previous_move"] = round(float(prev), 3)
+                row["scan_delta"] = round(float(row.get("move")) - float(prev), 3)
+                row["previous_scan_at"] = previous_at
+        except Exception:
+            pass
+    return rows
+
+
+def save_scan_state(rows: list[dict], collected_at: float) -> None:
+    try:
+        moves = {}
+        for row in rows:
+            key = str(row.get("tv_symbol") or row.get("symbol") or "")
+            if key:
+                moves[key] = float(row.get("move"))
+        RELAY_STATE_FILE.write_text(json.dumps({"collected_at": collected_at, "moves": moves}), encoding="utf-8")
+    except Exception:
+        pass
 
 
 def clean_company_name(name: str, symbol: str = "") -> str:
@@ -377,6 +606,7 @@ def _google_bundle(symbol: str, company: str) -> dict:
             "source": publisher or "Google News",
             "publisher_url": publisher_url,
             "published": published,
+            "published_epoch": published_epoch(published),
             "kind": classify_catalyst(headline),
             "score": source_score(publisher_url or link, publisher),
         })
@@ -400,6 +630,9 @@ def _google_bundle(symbol: str, company: str) -> dict:
             "news_url": reason["url"],
             "news_source": reason["source"][:120],
             "news_published_at": reason["published"][:120],
+            "news_published_epoch": reason.get("published_epoch"),
+            "catalyst_source_score": reason.get("score"),
+            "catalyst_quality": catalyst_quality(reason.get("score")),
             "reason_verified": True,
         })
     return out
@@ -437,6 +670,9 @@ def _gdelt_reason(symbol: str, company: str) -> dict:
             "news_url": url,
             "news_source": _domain(url, supplied_domain) or "source",
             "news_published_at": seen,
+            "news_published_epoch": published_epoch(seen),
+            "catalyst_source_score": score,
+            "catalyst_quality": catalyst_quality(score),
             "reason_verified": True,
         }))
     if not candidates:
@@ -484,6 +720,9 @@ def fetch_reason(row: dict) -> dict:
             "news_url": "",
             "news_source": "",
             "news_published_at": "",
+            "news_published_epoch": None,
+            "catalyst_source_score": None,
+            "catalyst_quality": "",
             "reason_verified": False,
         })
     _news_cache[key] = (now, dict(result))
@@ -513,44 +752,55 @@ def enrich_reasons(rows):
 
 def collect():
     errors = []
-    with ThreadPoolExecutor(max_workers=2) as pool:
+    sides = {"losers": [], "gainers": []}
+    benchmarks: dict[str, float] = {}
+    with ThreadPoolExecutor(max_workers=3) as pool:
         jobs = {
             pool.submit(scan, sort_order="asc", limit=MOVERS_PER_SIDE): "losers",
             pool.submit(scan, sort_order="desc", limit=MOVERS_PER_SIDE): "gainers",
+            pool.submit(fetch_sector_benchmarks): "benchmarks",
         }
-        sides = {"losers": [], "gainers": []}
         for job in as_completed(jobs):
             side = jobs[job]
             try:
-                sides[side] = job.result()
+                if side == "benchmarks":
+                    benchmarks = job.result()
+                else:
+                    sides[side] = job.result()
             except Exception as e:
-                errors.append(f"US {side}: {e}")
+                errors.append(("Sector benchmarks" if side == "benchmarks" else f"US {side}") + f": {e}")
 
     seen = set()
     merged = []
     # Default presentation: largest absolute moves first, regardless of sign.
+    # The web table can separately sort 1D ascending when the user wants the
+    # biggest negative movers first.
     for x in sorted(sides["losers"] + sides["gainers"], key=lambda r: abs(float(r["move"])), reverse=True):
         k = x.get("tv_symbol") or f"US:{x['symbol']}"
         if k in seen:
             continue
         seen.add(k)
         merged.append(x)
+    attach_sector_context(merged, benchmarks)
+    attach_scan_deltas(merged, load_scan_state())
     enrich_reasons(merged)
+    attach_themes(merged)
     for i, row in enumerate(merged, 1):
         row["rank"] = i
     return merged, errors
 
 
-def push(base, token, rows):
+def push(base, token, rows, collected_at: float):
     url = base.rstrip("/") + "/api/relay/movers"
     return post_json(
         url,
-        {"rows": rows, "source": "personal-mac-tradingview", "collected_at": time.time()},
+        {"rows": rows, "source": "personal-mac-tradingview", "collected_at": collected_at},
         {
             "X-Meridian-Relay-Token": token,
             "Origin": base.rstrip("/"),
             "Referer": base.rstrip("/") + "/",
         },
+        timeout=90,  # Render free instances may need time to wake or process uploads.
     )
 
 
@@ -558,7 +808,7 @@ def main():
     ap = argparse.ArgumentParser(description="Push local US mover scans to cloud Meridian")
     ap.add_argument("--url", default=os.getenv("MERIDIAN_URL", ""))
     ap.add_argument("--token", default=os.getenv("MERIDIAN_RELAY_TOKEN", ""))
-    ap.add_argument("--interval", type=int, default=90)
+    ap.add_argument("--interval", type=int, default=DEFAULT_INTERVAL_SECONDS, help="seconds between scans; default 3600 (1 hour)")
     ap.add_argument("--once", action="store_true")
     a = ap.parse_args()
 
@@ -566,27 +816,43 @@ def main():
         print("Need --url and --token (or MERIDIAN_URL / MERIDIAN_RELAY_TOKEN).", file=sys.stderr)
         return 2
 
-    print("Meridian relay v3.4.1 started. Ctrl+C stops it.")
-    print("US movers: TradingView · gainers + losers · Google News + GDELT company coverage")
+    print("Meridian relay v3.6 started. Ctrl+C stops it.", flush=True)
+    print("US movers: TradingView · 1D/1W/1M · relative volume · sector-relative context · Google News + GDELT", flush=True)
+    print(f"Refresh interval: {max(300, a.interval) // 60} minutes", flush=True)
 
     while True:
+        stage = "collecting TradingView movers and company news"
         try:
+            print(datetime.now().strftime("%H:%M:%S"), "collecting movers + news...", flush=True)
             rows, errors = collect()
-            res = push(a.url, a.token, rows)
             verified = sum(1 for r in rows if r.get("reason_verified"))
             news_count = sum(1 for r in rows if r.get("latest_news_url") or r.get("news_url"))
-            print(
-                datetime.now().strftime("%H:%M:%S"),
-                f"uploaded {len(rows)} movers · {verified} verified catalysts · {news_count} with news",
-                (" | " + "; ".join(errors) if errors else ""),
-                res,
-            )
-        except (HTTPError, URLError, TimeoutError, Exception) as e:
-            print(datetime.now().strftime("%H:%M:%S"), "relay error:", e, file=sys.stderr)
+            print(datetime.now().strftime("%H:%M:%S"),
+                  f"collected {len(rows)} movers · {verified} verified catalysts · {news_count} with news",
+                  (" | " + "; ".join(errors) if errors else ""), flush=True)
+
+            # Don't erase the existing dashboard if TradingView fails completely.
+            if not rows:
+                print(datetime.now().strftime("%H:%M:%S"),
+                      "upload skipped: no movers collected; existing cloud snapshot retained",
+                      flush=True)
+            else:
+                stage = "uploading mover snapshot to Render"
+                print(datetime.now().strftime("%H:%M:%S"), "uploading to Render (90s timeout)...", flush=True)
+                collected_at = time.time()
+                res = push(a.url, a.token, rows, collected_at)
+                save_scan_state(rows, collected_at)
+                print(datetime.now().strftime("%H:%M:%S"),
+                      f"uploaded {len(rows)} movers · {verified} verified catalysts · {news_count} with news",
+                      res, flush=True)
+        except Exception as e:
+            print(datetime.now().strftime("%H:%M:%S"),
+                  f"relay error while {stage}: {type(e).__name__}: {e}",
+                  file=sys.stderr, flush=True)
 
         if a.once:
             return 0
-        time.sleep(max(45, a.interval))
+        time.sleep(max(300, a.interval))
 
 
 if __name__ == "__main__":
