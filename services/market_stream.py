@@ -6,10 +6,11 @@ from .ibkr_webapi import IBKRWebAPI
 from .yahoo_market import YahooMarketAPI
 from .tradingview_market import TradingViewMoverAPI
 from .recovery_engine import analyse_recovery
-from .free_news import source_allowed, company_headline_relevant
 
 ROOT=Path(__file__).resolve().parents[1]
 HISTORY_CACHE=ROOT/'data'/'market_history_cache.json'
+RELAY_SNAPSHOT=ROOT/'data'/'relay_snapshot.json'
+RELAY_STALE_SECONDS=max(3600,int(os.getenv('MERIDIAN_RELAY_STALE_SECONDS','5400')))
 DEFAULT_PRIORITY=['AMD','NVDA','AAPL','MSFT','GOOGL','GOOG','AMZN','META','AVGO','TSLA','AMAT','ASML','MU','ORCL','BKNG','UBER','JPM','CAT','LVS','STAG','NKE','PLTR','QCOM','INTC','MRVL']
 
 class MarketState:
@@ -41,6 +42,7 @@ class MarketState:
             if s not in self.core_symbols:
                 self.core_symbols.append(s)
         self._load_history_cache()
+        self._load_relay_snapshot()
 
     def _load_history_cache(self):
         try:
@@ -54,6 +56,27 @@ class MarketState:
     def _save_history_cache(self):
         try: HISTORY_CACHE.write_text(json.dumps({'saved_at':time.time(),'features':self._history},indent=2),encoding='utf-8')
         except Exception: pass
+
+    def _load_relay_snapshot(self):
+        """Best-effort server-side snapshot cache.
+
+        Render's free filesystem is ephemeral, so the browser also keeps its own
+        last snapshot.  This file still preserves data across ordinary process
+        hiccups where the instance filesystem survives.
+        """
+        try:
+            payload=json.loads(RELAY_SNAPSHOT.read_text(encoding='utf-8'))
+            if isinstance(payload,dict) and isinstance(payload.get('rows'),list):
+                self._relay_movers=payload
+        except Exception:
+            pass
+
+    def _save_relay_snapshot(self):
+        try:
+            RELAY_SNAPSHOT.parent.mkdir(parents=True,exist_ok=True)
+            RELAY_SNAPSHOT.write_text(json.dumps(self._relay_movers,ensure_ascii=False),encoding='utf-8')
+        except Exception:
+            pass
 
     @property
     def status(self)->dict:
@@ -194,21 +217,9 @@ class MarketState:
                 continue
             if not symbol or not (-100 < move < 100):
                 continue
-            if not region.lower().startswith('us'):
-                continue
-            reason=str(raw.get('reason') or '').strip()[:180]
-            news_url=str(raw.get('news_url') or '').strip()[:1200]
-            verified=bool(raw.get('reason_verified'))
-            # Do not blindly trust an older relay: enforce the same source and relevance
-            # rules server-side before showing a headline as a verified reason.
-            if verified and reason and reason != 'No verified catalyst found':
-                verified = source_allowed(news_url, str(raw.get('news_source') or '')) and company_headline_relevant(reason, name, symbol)
-            if not verified:
-                reason='No verified catalyst found'
-                news_url=''
             row={
                 'symbol':symbol,'name':name,'region':region,
-                'region_code':'us',
+                'region_code':'us' if region.lower().startswith('us') else 'europe',
                 'exchange':str(raw.get('exchange') or '')[:32],
                 'move':round(move,3),'scanner_value':f'{move:.2f}%',
                 'price':raw.get('price'),'extended_price':raw.get('extended_price'),
@@ -218,24 +229,33 @@ class MarketState:
                 'currency':str(raw.get('currency') or '')[:12],'market_cap':raw.get('market_cap'),
                 'volume':raw.get('volume'),'relative_volume':raw.get('relative_volume'),
                 'tv_symbol':str(raw.get('tv_symbol') or '')[:80],
-                'reason':reason,
-                'cause_type':str(raw.get('cause_type') or 'unverified')[:40] if verified else 'unverified',
-                'news_url':news_url,
-                'news_source':str(raw.get('news_source') or '')[:120] if verified else '',
-                'news_published_at':str(raw.get('news_published_at') or '')[:120] if verified else '',
-                'reason_verified':verified,
-                # Preserve the latest accepted company-news link even when it is
-                # not strong enough to be promoted as the verified cause.
+                'sector':str(raw.get('sector') or '')[:100],
+                'industry':str(raw.get('industry') or '')[:120],
+                'themes':[str(x)[:80] for x in (raw.get('themes') or [])[:6] if str(x).strip()],
+                'week_move':raw.get('week_move'),'month_move':raw.get('month_move'),
+                'sector_benchmark':str(raw.get('sector_benchmark') or '')[:16],
+                'sector_move':raw.get('sector_move'),'sector_relative_move':raw.get('sector_relative_move'),
+                'previous_move':raw.get('previous_move'),'scan_delta':raw.get('scan_delta'),'previous_scan_at':raw.get('previous_scan_at'),
+                'reason':str(raw.get('reason') or '')[:180],
+                'cause_type':str(raw.get('cause_type') or '')[:40],
+                'reason_verified':bool(raw.get('reason_verified')),
+                'news_url':str(raw.get('news_url') or '')[:1200],
+                'news_source':str(raw.get('news_source') or '')[:120],
+                'news_published_at':str(raw.get('news_published_at') or '')[:120],
+                'news_published_epoch':raw.get('news_published_epoch'),
+                'catalyst_quality':str(raw.get('catalyst_quality') or '')[:24],
+                'catalyst_source_score':raw.get('catalyst_source_score'),
                 'latest_news_headline':str(raw.get('latest_news_headline') or '')[:220],
                 'latest_news_url':str(raw.get('latest_news_url') or '')[:1200],
                 'latest_news_source':str(raw.get('latest_news_source') or '')[:120],
                 'latest_news_published_at':str(raw.get('latest_news_published_at') or '')[:120],
             }
             clean.append(row)
-        clean.sort(key=lambda x: abs(float(x.get('move') or 0)), reverse=True)
+        clean.sort(key=lambda x: abs(float(x.get('move') or 0)),reverse=True)
         for i,row in enumerate(clean,1): row['rank']=i
         ts=float(collected_at or now)
         self._relay_movers={'rows':clean,'source':source,'collected_at':ts,'received_at':now}
+        self._save_relay_snapshot()
         self.version+=1
         return {'ok':True,'accepted':len(clean),'collected_at':ts}
 
@@ -243,29 +263,29 @@ class MarketState:
         relay=self._relay_movers
         if not relay: return None
         rows=relay.get('rows') or []
-        rows=[x for x in rows if x.get('region_code')=='us']
+        if region=='us': rows=[x for x in rows if x.get('region_code')=='us']
+        elif region=='europe': rows=[x for x in rows if x.get('region_code')=='europe']
         age=max(0,time.time()-float(relay.get('collected_at') or 0))
-        stale=age>600
+        stale=age>RELAY_STALE_SECONDS
         return {
             'provider':'local-relay','region':region,'rows':rows[:60],
-            'errors':(['Local relay snapshot is stale; start the Meridian relay on your Mac for fresh mover data.'] if stale else []),
+            'errors':(['Showing the last relay snapshot; it is older than the normal hourly refresh window.'] if stale else []),
             'updated_at':float(relay.get('collected_at') or 0),'received_at':float(relay.get('received_at') or 0),
             'age_seconds':round(age,1),'stale':stale,'cached':True,
-            'session_note':'Mover data collected from the local Meridian relay and pushed securely to Render.'
+            'session_note':'Mover data collected from the local Meridian relay. Old snapshots stay visible for reference rather than disappearing.'
         }
 
-    async def mover_radar(self, region: str = "us", *, force: bool = False) -> dict:
+    async def mover_radar(self, region: str = "all", *, force: bool = False) -> dict:
         region=region.lower().strip()
-        if region not in {"all","us"}:
-            raise ValueError("Mover Radar is US-only in Meridian v3.4")
-        region='us'
+        if region not in {"all","us","europe"}:
+            raise ValueError("region must be all, us, or europe")
         if self.provider == "yahoo":
             relay=self._relay_scan(region)
             if relay is not None:
                 return relay
             # Render/shared cloud IPs are often throttled by Yahoo's screener.
             # Use TradingView's bulk market scanner first; Yahoo remains a fallback.
-            limit=50
+            limit=60 if region=='all' else 45
             if not self._tradingview:
                 self._tradingview=TradingViewMoverAPI()
             tv = await self._tradingview.run_mover_scan(region, limit=limit, force=force)
@@ -283,14 +303,14 @@ class MarketState:
                 return tv
         if self.provider != "ibkr":
             rows=[x for x in self.snapshot() if x.get("kind","stock")=="stock"]
-            rows=sorted(rows,key=lambda x:abs(float(x.get("day",0))),reverse=True)[:35]
-            return {"provider":"demo","region":region,"rows":[{"rank":i+1,"symbol":x["symbol"],"name":x.get("name",x["symbol"]),"region":"US","move":x.get("day"),"exchange":"DEMO","conid":0,"reason":"No verified catalyst found","cause_type":"unverified","reason_verified":False} for i,x in enumerate(rows)],"cached":False,"updated_at":time.time()}
+            rows=sorted(rows,key=lambda x:float(x.get("day",0)))[:35]
+            return {"provider":"demo","region":region,"rows":[{"rank":i+1,"symbol":x["symbol"],"name":x.get("name",x["symbol"]),"region":"US","move":x.get("day"),"exchange":"DEMO","conid":0} for i,x in enumerate(rows)],"cached":False,"updated_at":time.time()}
         if not self._ibkr:
             raise RuntimeError("IBKR is still connecting. Wait for the dashboard status to show connected, then refresh Mover Radar.")
         now=time.time(); cache=self._mover_cache.get(region)
         if not force and cache and now-cache[0] < 30:
             return {**cache[1],"cached":True}
-        regions=['us']
+        regions=[region] if region!="all" else ["us","europe"]
         scans=[]; errors=[]
         for idx,r in enumerate(regions):
             try:
@@ -306,7 +326,7 @@ class MarketState:
         def mv(x):
             try:return float(x.get("move"))
             except Exception:return 999.0
-        merged.sort(key=lambda x:abs(mv(x)),reverse=True)
+        merged.sort(key=mv)
         # De-duplicate by contract id first, then region+symbol.
         seen=set(); rows=[]
         for x in merged:
@@ -355,7 +375,7 @@ class MarketState:
                     self.version+=1; self.updated_at=time.time()
                 self.connection_state='LIVE' if changed else ('CONNECTED' if self.ready_symbols else 'WAITING')
                 sess=self._yahoo.us_session()
-                self.connection_message=f'Cloud market data · {sess} · {len(self.ready_symbols)} core instruments ready · TradingView Movers available'
+                self.connection_message=f'Cloud market data · {sess} · {len(self.ready_symbols)} core instruments ready · TradingView Mover Radar available'
                 self.last_error=None; backoff=15.0
                 # Daily/reference core data does not need per-second polling. The browser
                 # still receives WebSocket state; global mover scans cache for two minutes.
