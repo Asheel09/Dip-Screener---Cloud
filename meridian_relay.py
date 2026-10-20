@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Meridian local mover relay — v3.6.2 context + hourly refresh.
+"""Meridian local mover relay — v3.7 adaptive regular-hours refresh.
 
 Runs on one ordinary Mac/Windows laptop, scans liquid US-listed stocks through
 TradingView, attaches a *verified* recent catalyst where a relevant free source
@@ -35,11 +35,14 @@ from xml.etree import ElementTree as ET
 TV_BASE = "https://scanner.tradingview.com/{market}/scan"
 GDELT_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
 GOOGLE_NEWS_RSS = "https://news.google.com/rss/search"
-NEWS_CACHE_SECONDS = 3600
+NEWS_CACHE_REGULAR_SECONDS = 600
+NEWS_CACHE_OFFHOURS_SECONDS = 3600
 MOVERS_PER_SIDE = 25
 MIN_ABS_MOVE = 1.5
 MAX_NEWS_WORKERS = 4
-DEFAULT_INTERVAL_SECONDS = 3600
+REGULAR_INTERVAL_SECONDS = 90
+OFF_HOURS_INTERVAL_SECONDS = 3600
+DEFAULT_INTERVAL_SECONDS = OFF_HOURS_INTERVAL_SECONDS
 MAX_SCAN_DELTA_AGE_SECONDS = 6 * 3600
 RELAY_STATE_FILE = Path(__file__).with_name("meridian_relay_state.json")
 _news_cache: dict[str, tuple[float, dict]] = {}
@@ -183,6 +186,28 @@ def us_session() -> str:
     if 960 <= m < 1200:
         return "AFTERHOURS"
     return "CLOSED"
+
+
+def seconds_until_next_regular_open() -> int:
+    """Seconds until the next weekday 09:30 ET open, using the relay's DST-safe ET clock."""
+    now = _eastern_now()
+    m = now.hour * 60 + now.minute
+    if now.weekday() <= 4 and m < 570:
+        target = now.replace(hour=9, minute=30, second=0, microsecond=0)
+        return max(1, int((target - now).total_seconds()))
+    days = 1
+    while (now.weekday() + days) % 7 > 4:
+        days += 1
+    target = (now + timedelta(days=days)).replace(hour=9, minute=30, second=0, microsecond=0)
+    return max(1, int((target - now).total_seconds()))
+
+
+def adaptive_interval_seconds(regular_seconds: int = REGULAR_INTERVAL_SECONDS, off_hours_seconds: int = OFF_HOURS_INTERVAL_SECONDS) -> int:
+    if us_session() == "REGULAR":
+        return max(45, int(regular_seconds))
+    # Do not sleep through the opening bell just because an hourly off-hours
+    # scan happened shortly before 09:30 ET.
+    return max(30, min(max(300, int(off_hours_seconds)), seconds_until_next_regular_open()))
 
 
 def payload(limit=60, *, sort_order="asc"):
@@ -574,10 +599,36 @@ def _headline_has_emoji(headline: str) -> bool:
     return any(unicodedata.category(ch) == "So" for ch in headline)
 
 
+LOW_SIGNAL_HEADLINE_PATTERNS = (
+    r"\btop .{0,60} competitors?\b",
+    r"\bstock forecasts?\b",
+    r"\bprice predictions?\b",
+    r"\bprice dynamics\b",
+    r"\bannual price changes?\b",
+    r"\bis .{1,70} a bargain\b",
+    r"\bbetter buy\b",
+    r"\bshould you buy\b",
+    r"\bundervalued narrative\b",
+    r"\bwhat .* stock could be worth\b",
+)
+LEGAL_SPAM_PATTERN = re.compile(
+    r"\b(law firm|attorneys?|levi & korsinsky|robbins geller|pomerantz|rosen law|bronstein|faruqi)\b.*"
+    r"\b(investigat|investors?|securities|class action|lawsuit)\b", re.I,
+)
+
+
+def low_signal_headline(headline: str) -> bool:
+    h = re.sub(r"\s+", " ", str(headline or "")).strip()
+    low = h.lower()
+    return any(re.search(p, low, flags=re.I) for p in LOW_SIGNAL_HEADLINE_PATTERNS) or bool(LEGAL_SPAM_PATTERN.search(h))
+
+
 def headline_relevant(headline: str, company: str, symbol: str) -> bool:
     h = re.sub(r"\s+", " ", str(headline or "")).strip()
     low = h.lower()
     if not h:
+        return False
+    if low_signal_headline(h):
         return False
     # Reject community-style / opinion-style snippets such as the ABSI example.
     if _headline_has_emoji(h):
@@ -740,7 +791,8 @@ def fetch_reason(row: dict) -> dict:
     key = str(row.get("tv_symbol") or f"US:{row.get('symbol')}")
     now = time.time()
     cached = _news_cache.get(key)
-    if cached and now - cached[0] < NEWS_CACHE_SECONDS:
+    cache_seconds = NEWS_CACHE_REGULAR_SECONDS if us_session() == "REGULAR" else NEWS_CACHE_OFFHOURS_SECONDS
+    if cached and now - cached[0] < cache_seconds:
         return dict(cached[1])
 
     symbol = str(row.get("symbol") or "")
@@ -868,7 +920,9 @@ def main():
     ap = argparse.ArgumentParser(description="Push local US mover scans to cloud Meridian")
     ap.add_argument("--url", default=os.getenv("MERIDIAN_URL", ""))
     ap.add_argument("--token", default=os.getenv("MERIDIAN_RELAY_TOKEN", ""))
-    ap.add_argument("--interval", type=int, default=DEFAULT_INTERVAL_SECONDS, help="seconds between scans; default 3600 (1 hour)")
+    ap.add_argument("--interval", type=int, default=0, help="legacy fixed interval override in seconds; 0 uses adaptive cadence")
+    ap.add_argument("--regular-interval", type=int, default=REGULAR_INTERVAL_SECONDS, help="seconds between scan starts during US regular trading hours; default 90")
+    ap.add_argument("--off-hours-interval", type=int, default=OFF_HOURS_INTERVAL_SECONDS, help="seconds between scan starts outside US regular trading hours; default 3600")
     ap.add_argument("--once", action="store_true")
     a = ap.parse_args()
 
@@ -876,19 +930,28 @@ def main():
         print("Need --url and --token (or MERIDIAN_URL / MERIDIAN_RELAY_TOKEN).", file=sys.stderr)
         return 2
 
-    print("Meridian relay v3.6.2 started. Ctrl+C stops it.", flush=True)
+    print("Meridian relay v3.7 started. Ctrl+C stops it.", flush=True)
     print("US movers: TradingView · 1D/1W/1M · relative volume · sector-relative context · Google News + GDELT", flush=True)
-    print(f"Refresh interval: {max(300, a.interval) // 60} minutes", flush=True)
+    if a.interval > 0:
+        print(f"Refresh cadence: fixed {max(45, a.interval)} seconds", flush=True)
+    else:
+        print(f"Adaptive refresh: {max(45, a.regular_interval)}s during US regular hours · {max(300, a.off_hours_interval) // 60}m otherwise", flush=True)
 
     while True:
+        cycle_started = time.time()
         stage = "collecting TradingView movers and company news"
         try:
             print(datetime.now().strftime("%H:%M:%S"), "collecting movers + news...", flush=True)
             rows, errors = collect()
             verified = sum(1 for r in rows if r.get("reason_verified"))
             news_count = sum(1 for r in rows if r.get("latest_news_url") or r.get("news_url"))
+            sector_n = sum(1 for r in rows if r.get("sector"))
+            industry_n = sum(1 for r in rows if r.get("industry"))
+            week_n = sum(1 for r in rows if r.get("week_move") is not None)
+            month_n = sum(1 for r in rows if r.get("month_move") is not None)
+            relvol_n = sum(1 for r in rows if r.get("relative_volume") is not None)
             print(datetime.now().strftime("%H:%M:%S"),
-                  f"collected {len(rows)} movers · {sum(1 for r in rows if r.get('sector') or r.get('industry') or r.get('week_move') is not None or r.get('month_move') is not None)} with context · {verified} verified catalysts · {news_count} with news",
+                  f"collected {len(rows)} movers · context sector {sector_n}/{len(rows)} · industry {industry_n}/{len(rows)} · 1W {week_n}/{len(rows)} · 1M {month_n}/{len(rows)} · relvol {relvol_n}/{len(rows)} · {verified} verified catalysts · {news_count} with news",
                   (" | " + "; ".join(errors) if errors else ""), flush=True)
 
             # Don't erase the existing dashboard if TradingView fails completely.
@@ -912,7 +975,16 @@ def main():
 
         if a.once:
             return 0
-        time.sleep(max(300, a.interval))
+        target = max(45, a.interval) if a.interval > 0 else adaptive_interval_seconds(a.regular_interval, a.off_hours_interval)
+        elapsed = time.time() - cycle_started
+        sleep_for = max(5, target - elapsed)
+        session = us_session()
+        if target < 300:
+            cadence = f"{target}s regular-hours cadence"
+        else:
+            cadence = f"{max(1, round(target / 60))}m off-hours cadence"
+        print(datetime.now().strftime("%H:%M:%S"), f"next scan in ~{max(1, round(sleep_for))}s · {session} · {cadence}", flush=True)
+        time.sleep(sleep_for)
 
 
 if __name__ == "__main__":
